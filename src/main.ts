@@ -1409,6 +1409,11 @@ function openDoc(path: string | null, content: string, name?: string, encoding?:
   if (path) {
     const existing = docs.find((d) => d.path === path);
     if (existing) {
+      // v0.4.12 用户实报"双击打开文件从中间显示"：外部打开（双击/树/最近/快开/ES）是明确的
+      // 从头意图，须清掉离开标签时存的阅读位置（含会话恢复惰性标签的 restoreScroll），
+      // 否则去重切换会滚回上次位置。保留位置只服务两个场景：点标签栏切回、重启会话续读。
+      existing.scrollTop = 0;
+      existing.restoreScroll = null;
       switchDoc(existing.id);
       // 已打开的文件也要树联动：点"最近"里已开过的文件（如其它目录），树根得跟着切
       const dir = docDirOf(path);
