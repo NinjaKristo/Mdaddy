@@ -310,11 +310,49 @@ const WELCOME_TEXT: Record<Lang, string> = {
 `,
 };
 
+// ---- v0.5.0 便携模式偏好层：PORTABLE 走 Rust 侧 Data/settings.json，安装版维持 localStorage ----
+// 便携模式 WebView2 数据目录被指去 %TEMP%（不随机器持久），localStorage 偏好会丢；
+// 统一改走 prefGet/prefSet：启动一次载入内存 Map，写时全量落盘（语言/字号/面板宽等低频写，无需防抖）。
+// 顶层 await（毫秒级本地 IPC）保证下方 detectLang 等模块顶层同步读取能拿到便携值。
+let PORTABLE = false;
+let PREFS: Record<string, string> = {};
+function prefGet(key: string): string | null {
+  if (!PORTABLE) {
+    try { return localStorage.getItem(key); } catch { return null; }
+  }
+  return PREFS[key] ?? null;
+}
+function prefSet(key: string, val: string): void {
+  if (!PORTABLE) {
+    try { localStorage.setItem(key, val); } catch { /* 存储禁用则仅本会话生效 */ }
+    return;
+  }
+  PREFS[key] = val;
+  void invoke("save_prefs", { v: PREFS }).catch(() => { /* U盘拔出等落盘失败→仅本会话 */ });
+}
+function prefRemove(key: string): void {
+  if (!PORTABLE) {
+    try { localStorage.removeItem(key); } catch { /* 同上 */ }
+    return;
+  }
+  delete PREFS[key];
+  void invoke("save_prefs", { v: PREFS }).catch(() => { /* 同上 */ });
+}
+async function initPrefs(): Promise<void> {
+  try {
+    PORTABLE = await invoke<boolean>("is_portable");
+    if (PORTABLE) {
+      const v = await invoke<Record<string, unknown> | null>("load_prefs");
+      if (v) for (const [k, val] of Object.entries(v)) if (typeof val === "string") PREFS[k] = val;
+    }
+  } catch { /* invoke 失败（极端）→ 按安装版 localStorage 走 */ }
+}
+
 function detectLang(): Lang {
   // try/catch：隐私模式/存储被禁用时 getItem 抛错——detectLang 在模块顶层(先于 boot)同步执行，
   // 不兜底会整页白屏。navigator 同理防御。
   let saved: string | null = null;
-  try { saved = localStorage.getItem("md-editor-lang"); } catch { /* 存储禁用/损坏 → 回退 navigator */ }
+  try { saved = prefGet("md-editor-lang"); } catch { /* 存储禁用/损坏 → 回退 navigator */ }
   if (saved === "zh-CN" || saved === "zh-TW" || saved === "en") return saved;
   let nl = "zh-cn";
   try { nl = (navigator.language || "zh-CN").toLowerCase(); } catch { /* navigator 不可用 → 默认简中 */ }
@@ -347,7 +385,7 @@ let fontSelHlEls: HTMLElement[] = [];           // 需求3 自定义选区高亮
 function loadFontSize(): number {
   // 仿 detectLang：隐私模式/存储禁用时 getItem 抛错，try/catch 否则整页白屏
   try {
-    const v = parseInt(localStorage.getItem(FONT_SIZE_KEY) || "", 10);
+    const v = parseInt(prefGet(FONT_SIZE_KEY) || "", 10);
     if (v >= 8 && v <= 72) return v;
   } catch { /* 存储禁用/损坏 → 用默认 */ }
   return DEFAULT_FONT_SIZE;
@@ -2023,7 +2061,7 @@ function setupEsSplitter(): void {
   const ul = document.getElementById("es-results");
   if (!ul || (ul as any).__splitterReady) return;
   (ul as any).__splitterReady = true;
-  const saved = localStorage.getItem("mdes-name-w");
+  const saved = prefGet("mdes-name-w");
   if (saved) ul.style.setProperty("--es-name-w", saved);
   let dragging = false;
   ul.addEventListener("mousedown", (e) => {
@@ -2042,7 +2080,7 @@ function setupEsSplitter(): void {
       dragging = false;
       document.removeEventListener("mousemove", mv);
       document.removeEventListener("mouseup", up);
-      localStorage.setItem("mdes-name-w", ul.style.getPropertyValue("--es-name-w"));
+      prefSet("mdes-name-w", ul.style.getPropertyValue("--es-name-w"));
     };
     document.addEventListener("mousemove", mv);
     document.addEventListener("mouseup", up);
@@ -2051,7 +2089,7 @@ function setupEsSplitter(): void {
   ul.addEventListener("dblclick", (e) => {
     if (!(e.target as HTMLElement).closest(".es-split")) return;
     ul.style.removeProperty("--es-name-w");
-    localStorage.removeItem("mdes-name-w");
+    prefRemove("mdes-name-w");
   });
   // 拖动后抑制行 click（防止拖完误开文件）
   ul.addEventListener("click", (e) => {
@@ -3361,7 +3399,7 @@ function setLang(lang: Lang) {
   // 清场字号交互态（同 switchMode）：重建后 savedRange/savedTa 悬空、fontInputInteracting 需复位
   fontInputInteracting = false; savedRange = null; savedTa = null; savedStart = 0; savedEnd = 0;
   clearFontSelHl();
-  try { localStorage.setItem("md-editor-lang", lang); } catch { /* 存储禁用，仅本次会话生效 */ }
+  try { prefSet("md-editor-lang", lang); } catch { /* 存储禁用，仅本次会话生效 */ }
   applyAllText();
   if (vditor) {
     switchInFlight = true; // 语言切换重建期间上锁，与 switchMode 互斥（after 回调统一释放）
@@ -3793,7 +3831,7 @@ function typewriterScroll() {
 function setFocusMode(on: boolean) {
   focusModeOn = on;
   document.body.classList.toggle("focus-mode", on);
-  try { localStorage.setItem(FOCUS_KEY, on ? "1" : "0"); } catch { /* 存储禁用，仅本次会话生效 */ }
+  try { prefSet(FOCUS_KEY, on ? "1" : "0"); } catch { /* 存储禁用，仅本次会话生效 */ }
   document.getElementById("btn-focus-mode")?.classList.toggle("active", on);
   if (on) markCurrentBlock();
   else document.querySelectorAll(".fw-current").forEach((e) => e.classList.remove("fw-current"));
@@ -4291,7 +4329,7 @@ const COLW_KEY = "mded-colw-v1";
 let tblWidthObserver: MutationObserver | null = null;
 
 function colwAll(): Record<string, Record<string, number[]>> {
-  try { return JSON.parse(localStorage.getItem(COLW_KEY) || "{}"); } catch { return {}; }
+  try { return JSON.parse(prefGet(COLW_KEY) || "{}"); } catch { return {}; }
 }
 function tableSig(tb: HTMLTableElement): string {
   return (tb.rows[0]?.innerText || "").replace(/\s+/g, "").slice(0, 60);
@@ -4411,7 +4449,7 @@ function rebindTableResize(): void {
       const k = docKeyOf();
       all[k] = all[k] || {};
       all[k][tableSig(tb)] = widths;
-      try { localStorage.setItem(COLW_KEY, JSON.stringify(all)); } catch { /* 存储禁用则仅本会话 */ }
+      try { prefSet(COLW_KEY, JSON.stringify(all)); } catch { /* 存储禁用则仅本会话 */ }
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
@@ -4429,7 +4467,7 @@ function initOutlineResize(): void {
   const clamp = (w: number): number =>
     Math.min(OUTLINE_W_MAX, Math.max(OUTLINE_W_MIN, Math.min(w, Math.floor(window.innerWidth / 2))));
   try {
-    const saved = parseInt(localStorage.getItem(OUTLINE_W_KEY) || "", 10);
+    const saved = parseInt(prefGet(OUTLINE_W_KEY) || "", 10);
     if (!isNaN(saved)) panel.style.width = clamp(saved) + "px";
   } catch { /* 存储禁用则用 CSS 默认宽 */ }
   // v0.3.15：事件挂独立把手（不再用面板近缘判定）——大纲/文件列表内容溢出时右缘被
@@ -4446,7 +4484,7 @@ function initOutlineResize(): void {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
       gutter.classList.remove("dragging");
-      try { localStorage.setItem(OUTLINE_W_KEY, String(Math.round(panel.getBoundingClientRect().width))); } catch { /* 存储禁用则仅本会话 */ }
+      try { prefSet(OUTLINE_W_KEY, String(Math.round(panel.getBoundingClientRect().width))); } catch { /* 存储禁用则仅本会话 */ }
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
@@ -5389,6 +5427,14 @@ async function exportPdf(pathOverride?: string) {
 }
 
 async function boot() {
+  // v0.5.0 便携偏好载入：必须先于一切 prefGet。不放模块顶层 await——模块求值期 IPC
+  // 通道未就绪，invoke 永久 pending 会把整个模块（含本 boot）挂死（实测教训）；
+  // boot 期 IPC 已就绪（下一行 get_startup_file 同为 invoke，旧版即此约定）。
+  await initPrefs();
+  { // 模块顶层 detectLang 时便携值未载（回退了 navigator），此处以便携值纠正——UI 尚未构建，直接赋值安全
+    const pl = prefGet("md-editor-lang");
+    if (pl === "zh-CN" || pl === "zh-TW" || pl === "en") currentLang = pl;
+  }
   try {
     const sf = await invoke<string | null>("get_startup_file");
     if (sf) pendingFile = sf;
@@ -5451,7 +5497,10 @@ async function boot() {
   updateModeUI();
   applyAllText(); // 初始化静态文案到当前语言
   const langSel = document.getElementById("lang-select") as HTMLSelectElement | null;
-  if (langSel) langSel.addEventListener("change", () => setLang(langSel.value as Lang));
+  if (langSel) {
+    langSel.value = currentLang; // 便携值纠正后与下拉默认项同步（安装版两者本就一致，无感）
+    langSel.addEventListener("change", () => setLang(langSel.value as Lang));
+  }
   // 编辑区字号（基于选区）：先在编辑区框选文字，再点下拉选字号 → 选区文字被包进内联 <span style="font-size:Npx">。
   // 点下拉会抢走 contenteditable 焦点并使选区折叠：在 mousedown(capture) 先快照选区，change 时再对快照应用。
   const fssInit = document.getElementById("font-size-select") as HTMLInputElement | null;
@@ -5482,7 +5531,7 @@ async function boot() {
       fssInit.value = String(px);
       applyFontSizeToSelection(px);
       clearFontSelHl();                   // apply 后真实选区已重选恢复高亮(富文本) → 移除自定义层
-      try { localStorage.setItem(FONT_SIZE_KEY, String(px)); } catch { /* 存储禁用，仅本次会话生效 */ }
+      try { prefSet(FONT_SIZE_KEY, String(px)); } catch { /* 存储禁用，仅本次会话生效 */ }
     });
     // 光标定位到某文字时，把工具栏字号显示同步为该文字实际渲染字号（仅显示，绝不触发 apply）。
     // 仅富文本模式（contenteditable）：源码模式 textarea 是原始文本、无内联字号概念，跳过。
@@ -5645,8 +5694,8 @@ async function boot() {
   } catch { /* dev 浏览器态无 Tauri，保回落值 */ }
   // 恢复上次会话的专注状态（打字机模式已按用户要求移除，遗留键清理）
   try {
-    if (localStorage.getItem(FOCUS_KEY) === "1") setFocusMode(true);
-    localStorage.removeItem("md-editor-typewriter");
+    if (prefGet(FOCUS_KEY) === "1") setFocusMode(true);
+    prefRemove("md-editor-typewriter");
   } catch { /* 存储禁用 */ }
   // v0.3.14 侧栏文件页（文件树/最近/跨文件搜索）+ 快开 + 主题；v0.3.15 标签右键菜单
   initSidePanels();

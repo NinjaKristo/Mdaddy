@@ -15,7 +15,34 @@ struct StartupFile(Mutex<Option<String>>);
 // 纯本机文件，无任何网络上报（离线个人工具定位不变）。
 static LOG_W: Mutex<()> = Mutex::new(());
 
+// ===== v0.5.0 便携模式：exe 旁存在 Data 目录 → 数据全部跟 exe 走（U盘场景） =====
+// 判据同 VS Code portable 惯例（data 目录在即启用）。跟 Data 走的：ui-state.json /
+// themes/ / pasted/ / logs/ / settings.json（UI 偏好）；不跟的：全盘索引缓存→%TEMP%
+// （索引对象是本机磁盘的文件名，跟U盘走换机后会载入另一台机器的陈旧索引）。
+// 安装版（exe 旁无 Data）行为完全不变，仍走 %APPDATA%。
+static PORTABLE_DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// 判定核心（可单测）：给定 exe 路径，返回其旁 Data 目录（存在即便携）
+fn portable_dir_at(exe: &std::path::Path) -> Option<PathBuf> {
+    let d = exe.parent()?.join("Data");
+    d.is_dir().then(|| d)
+}
+
+fn portable_dir() -> Option<&'static PathBuf> {
+    PORTABLE_DIR
+        .get_or_init(|| std::env::current_exe().ok().as_deref().and_then(portable_dir_at))
+        .as_ref()
+}
+
+/// 便携模式则返回 exe 旁 Data 目录的绝对路径（日志用；clone 免生命周期耦合）
+fn portable_dir_owned() -> Option<PathBuf> {
+    portable_dir().cloned()
+}
+
 fn logs_dir() -> PathBuf {
+    if let Some(d) = portable_dir() {
+        return d.join("logs");
+    }
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
     PathBuf::from(base).join("md-editor").join("logs")
 }
@@ -835,9 +862,16 @@ fn file_meta(path: String) -> Result<FileMeta, String> {
 // ===== UI 状态持久化（显示比例等）：写 %APPDATA%/<identifier>/ui-state.json =====
 // 不用 localStorage：WebView2 的 localStorage 磁盘刷盘异步，进程被强杀/崩溃即丢
 // （e2e 里 taskkill //F 复现），文件写入是同步可靠的。
+// v0.5.0 便携模式：改写 exe 旁 Data/ui-state.json（data_root 统一分流）。
+fn data_root(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(d) = portable_dir() {
+        return Ok(d.clone());
+    }
+    app.path().app_data_dir().map_err(|e| e.to_string())
+}
+
 fn ui_state_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    Ok(dir.join("ui-state.json"))
+    Ok(data_root(app)?.join("ui-state.json"))
 }
 
 #[tauri::command]
@@ -852,11 +886,40 @@ fn save_ui_state(app: AppHandle, v: serde_json::Value) -> Result<(), String> {
     fs::write(&p, serde_json::to_string(&v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
 }
 
+// ===== v0.5.0 UI 偏好便携化：便携模式走 Data/settings.json，安装版维持 localStorage =====
+// 便携模式下 WebView2 数据目录被指去 %TEMP%（localStorage 不随机器持久），语言/字号/
+// 面板宽度等低频偏好必须落 Data 才能跟U盘走。安装版前端不调这两个命令。
+fn prefs_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let d = data_root(app)?;
+    if portable_dir().is_none() {
+        return Err("not portable".into());
+    }
+    Ok(d.join("settings.json"))
+}
+
+#[tauri::command]
+fn is_portable() -> bool {
+    portable_dir().is_some()
+}
+
+#[tauri::command]
+fn load_prefs(app: AppHandle) -> Option<serde_json::Value> {
+    let p = prefs_path(&app).ok()?;
+    fs::read_to_string(p).ok().and_then(|s| serde_json::from_str(&s).ok())
+}
+
+#[tauri::command]
+fn save_prefs(app: AppHandle, v: serde_json::Value) -> Result<(), String> {
+    let p = prefs_path(&app)?; // 安装版误调 → Err("not portable")，不写安装版目录
+    fs::create_dir_all(p.parent().ok_or("no parent")?).map_err(|e| e.to_string())?;
+    fs::write(&p, serde_json::to_string(&v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
 // ===== v0.4.0 自定义主题：themes/ 目录扫描 + 读取（Typora 社区主题兼容） =====
 // 目录：%APPDATA%/<identifier>/themes/。一个 .css 文件 = 一个主题（文件名即主题名，
 // 同 Typora 的 themes 目录约定）。读取校验 canonicalize 在主题目录内防穿越。
 fn themes_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("themes"))
+    Ok(data_root(app)?.join("themes"))
 }
 
 #[tauri::command]
@@ -1228,6 +1291,12 @@ fn lower_thread_priority() {
 }
 
 fn index_cache_path() -> PathBuf {
+    // 便携模式特例：索引的是本机磁盘文件名，不跟U盘走（换机后另一台的索引无效），
+    // 落 %TEMP% 各机自建；代价是便携版每台新机器首建索引（1-3 分钟，同安装版冷启动）。
+    if portable_dir().is_some() {
+        let t = std::env::var("TEMP").unwrap_or_else(|_| ".".into());
+        return PathBuf::from(t).join("md-editor").join("file-index.txt");
+    }
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
     PathBuf::from(base).join("md-editor").join("file-index.txt")
 }
@@ -1486,7 +1555,7 @@ fn save_paste_image(app: AppHandle, doc_dir: String, ext: String, data_b64: Stri
     let base = format!("截图_{:04}{:02}{:02}_{:02}{:02}{:02}", y, mo, d, secs / 3600, secs % 3600 / 60, secs % 60);
 
     let (dir, rel) = if doc_dir.is_empty() {
-        let d = app.path().app_data_dir().map_err(|e| e.to_string())?.join("pasted");
+        let d = data_root(&app)?.join("pasted");
         (d, String::new()) // 未命名文档：无相对基准，用绝对路径引用
     } else {
         let d = PathBuf::from(&doc_dir).join("assets");
@@ -1567,6 +1636,14 @@ fn fatal_msgbox(text: &str, caption: &str) {
 pub fn run() {
     // v0.3.23 运行日志首行：run() 第一件事（覆盖开机第一行，不留观测盲区）
     log_startup(&std::env::args().skip(1).collect::<Vec<_>>().join(" "));
+    // v0.5.0 便携模式：WebView2 数据目录（缓存/localStorage）→ %TEMP%，宿主机不留痕。
+    // 必须在 WebView 创建（Builder 之后）前设好；偏好数据由 Data/settings.json 随U盘走，
+    // %TEMP% 里只有可重建的缓存，系统清理/重启即无。
+    if let Some(pd) = portable_dir_owned() {
+        app_log("INFO", "portable", &format!("便携模式已启用：Data={}", pd.display()));
+        let tmp = std::env::var("TEMP").unwrap_or_else(|_| ".".into());
+        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", PathBuf::from(tmp).join("md-editor").join("webview"));
+    }
     // 启动预检：WebView2 Runtime 缺失（极老/精简系统）时 Tauri 会静默失败或白屏，
     // 先给出可读指引再退出（明算工具缺 VC++ DLL 用户机起不来的同类教训）。
     #[cfg(windows)]
@@ -1637,6 +1714,9 @@ pub fn run() {
             open_pdf_external,
             open_dropped_pdf,
             load_ui_state,
+            is_portable,
+            load_prefs,
+            save_prefs,
             save_binary_file,
             read_binary_file,
             write_export_file,
@@ -1668,6 +1748,25 @@ mod tests {
     // 测试产品代码本身（非镜像副本）：use super::* 直访私有函数，零可见性改动
     use super::*;
     use std::fs;
+
+    #[test]
+    fn portable_dir_detection() {
+        // v0.5.0 便携判据：exe 旁 Data 目录存在→Some；不存在/无父路径→None。
+        // 不碰真实 exe（PORTABLE_DIR 全局缓存在测试进程里无 Data 应为 None，仅作旁证）。
+        let tmp = std::env::temp_dir().join(format!("mde-portable-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let exe = tmp.join("md-editor.exe");
+        // 无 Data 目录 → None
+        fs::create_dir_all(&tmp).unwrap();
+        assert_eq!(portable_dir_at(&exe), None);
+        // 建 Data → Some(其路径)
+        fs::create_dir_all(tmp.join("Data")).unwrap();
+        let got = portable_dir_at(&exe).unwrap();
+        assert_eq!(got, tmp.join("Data"));
+        // exe 在根目录（无父目录分量异常场景由 parent() 天然返回 None 分支覆盖，不构造）
+        assert_eq!(portable_dir_at(std::path::Path::new("md-editor.exe")), None);
+        let _ = fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn es_search_selfindex_queries() {

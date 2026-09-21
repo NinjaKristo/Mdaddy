@@ -94,7 +94,12 @@
 
 [![下载 md-editor.exe](https://img.shields.io/badge/⬇下载-md--editor.exe-4470e0?style=for-the-badge)](https://github.com/frandy820/md-editor/releases/latest)
 
-去 [Releases](https://github.com/frandy820/md-editor/releases) 下载 `md-editor.exe`，双击即可运行（便携，免安装）。
+去 [Releases](https://github.com/frandy820/md-editor/releases) 下载，两种形态：
+
+- **`md-editor.exe`**：单文件绿色版，双击即可运行（免安装）。界面配置存在系统用户目录（`%APPDATA%`）。
+- **`md-editor-portable-vX.Y.Z.zip`**：U 盘便携版。解压到 U 盘任意目录直接运行——exe 旁的 `Data` 文件夹存在即自动进入便携模式，语言/主题/会话/日志等全部数据跟着 U 盘走，宿主机不留个人数据（WebView 缓存放系统临时目录，可随系统清理）。升级 = 下载新 zip 覆盖 `md-editor.exe`，`Data` 文件夹不受影响。
+
+  便携版两点说明：① 程序基于系统 WebView2 运行时（Win11 自带，多数 Win10 也已随 Edge 安装，极少数老机器首次需联网装一次运行时）；② 全盘文件名索引按机器分别缓存在该机临时目录（不跟 U 盘），新机器首次搜索会先建索引。
 
 **设为 .md 默认程序**：右键任意 .md → 打开方式 → 选 `md-editor.exe` → 勾选「始终使用此应用」。
 

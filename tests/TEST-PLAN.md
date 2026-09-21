@@ -22,7 +22,10 @@
 | 文件树/ES 搜索/定位（makeTreeNode/runEsSearch/esLocateTree） | E、H、I、J |
 | 主题/样式（styles.css/applyTheme） | D、J |
 | 导出/打印 | fullcheck(E)、C |
+| 便携模式（lib.rs portable_dir/data_root/settings·main.ts pref 层·v0.5.0） | cargo test + P 组 |
 | lib.rs（Rust 命令） | cargo test + 相关组 |
+
+P 组脚本：`output/md-editor-portable-v050/e2e_portable_v050.py`（P1 启动三落点/P2 语言→settings.json/P3 重启持久/P4 安装版回归/P5 zip 结构；**跑时 TEMP/TMP 指回 C 盘**——J 组 2026-09-21 实锤：TEMP 落 F 盘时树展开 list_md_dir 受 F 盘 IO 挂起病灶牵连假挂）。J 组同日基线对照：J2a/J10 两断言 v0.4.12 同挂=存量漂移（#theme-select 引用过期+树高亮断言漂移），非产品回归，待修脚本。
 
 ## 三、冒烟集命令
 

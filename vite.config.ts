@@ -10,6 +10,9 @@ export default defineConfig(async () => ({
   //
   // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
+  // v0.5.0 便携偏好层用 top-level await（模块顶层载入 Data/settings.json 再进 boot）；
+  // 默认 target(chrome87) 不含 TLA。WebView2=Chromium 100+，es2022 安全。
+  build: { target: "es2022" },
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
     port: 1420,
