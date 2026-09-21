@@ -101,11 +101,14 @@ fn log_startup(args: &str) {
         std::process::id(),
         if args.is_empty() { "(无)" } else { args }
     ));
-    // 系统/运行环境一次采集（失败不阻断）
-    let ver = sys_ver();
-    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "(路径不可用)".into());
-    app_log("INFO", "startup", &format!("os={} | exe={}", ver, exe));
+    // 系统/运行环境采集挪后台线程（v0.5.1 启动加速：cmd /c ver 实测 ~200ms，
+    // 原同步跑在窗口创建前白等；app_log 有 Mutex 线程安全，os= 行时间戳可能晚于后续行，可接受）
+    std::thread::spawn(|| {
+        let ver = sys_ver();
+        let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "(路径不可用)".into());
+        app_log("INFO", "startup", &format!("os={} | exe={}", ver, exe));
+    });
     // panic 钩子：崩溃落日志（用户闪退/白屏的观测盲区）
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -1596,21 +1599,13 @@ fn webview2_missing() -> bool {
     if std::env::var_os("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER").is_some() {
         return false;
     }
-    const KEY: &str = r"Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
-    for hive in ["HKLM", "HKCU"] {
-        for sub in [format!(r"SOFTWARE\WOW6432Node\{KEY}"), format!(r"SOFTWARE\{KEY}")] {
-            let mut cmd = Command::new("reg");
-            cmd.args(["query", &format!(r"{hive}\{sub}"), "/v", "pv"]);
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                cmd.creation_flags(CREATE_NO_WINDOW);
-            }
-            if let Ok(o) = cmd.output() {
-                if o.status.success() {
-                    return false;
-                }
+    // v0.5.1 启动加速：文件系统目录探测替代 4 次 reg query 子进程（实测最坏 ~390ms → ~1ms）。
+    // Evergreen 运行时的安装位置固定：per-machine=%ProgramFiles(x86)%、per-user=%LOCALAPPDATA%
+    // 下的 Microsoft\EdgeWebView\Application\，目录由安装器创建，存在即已安装（损坏场景 reg 探测同样无解）。
+    for base in [std::env::var_os("ProgramFiles(x86)"), std::env::var_os("LOCALAPPDATA")] {
+        if let Some(b) = base {
+            if PathBuf::from(&b).join(r"Microsoft\EdgeWebView\Application").is_dir() {
+                return false;
             }
         }
     }

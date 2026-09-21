@@ -1,7 +1,7 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
-import { open as openDialog, save as saveDialog, confirm } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog, confirm, ask } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 // 拖放改用 HTML5（dragDropEnabled:false），不再用 Tauri 原生 getCurrentWebview 监听
@@ -132,7 +132,7 @@ const UI_TEXT: Record<Lang, Record<string, string>> = {
     fmDelTitle: "删除确认", fmDelFileMsg: "确定删除该文件？不可恢复。", fmDelDirMsg: "确定删除该文件夹及其全部内容？不可恢复。",
     fmNoBase: "请先打开文件或在树中定位一个目录", untitledMd: "未命名.md", untitledDir: "新建文件夹", fmCopyDone: "已复制", fmOk: "确定", fileTooBigSuf: " 万字，上限 200 万字），已阻止打开以免长时间无响应，请拆分后再编辑。", bigLoad: "正在加载大文件，请稍候…",
     statusSelected: "已选 {n}", extChanged: "文件「{f}」已被其他程序修改（磁盘内容变化）。", extChangedDirty: "文件「{f}」已被其他程序修改；本标签有未保存改动，重新加载将丢弃本地改动。", extDeleted: "文件「{f}」已不存在（可能被移动或删除）。",
-    extReload: "重新加载", extDismiss: "忽略",
+    extReload: "重新加载", extDismiss: "忽略", extAskReload: "是否加载最新的文件内容？",
     bigDocBar: "大文档模式：编辑约 1.5 秒后生效（延迟保存通道），保存与撤销不受影响。", bigDocBarIr: "大文档在即时渲染模式下会严重卡顿，建议用顶部按钮切到所见即所得；编辑约 1.5 秒后生效。",
     tabClose: "关闭", tabCloseOthers: "关闭其它", tabCloseRight: "关闭右侧", tabCloseLeft: "关闭左侧", tabCloseAll: "全部关闭", tabCloseSelected: "关闭选中",
     themeTip: "界面主题：浅色 / 深色 / 护眼（未选过跟随系统）；themes 目录可放 Typora 社区主题",
@@ -200,7 +200,7 @@ const UI_TEXT: Record<Lang, Record<string, string>> = {
     fmDelTitle: "刪除確認", fmDelFileMsg: "確定刪除該檔案？無法復原。", fmDelDirMsg: "確定刪除該資料夾及其全部內容？無法復原。",
     fmNoBase: "請先開啟檔案或在樹中定位一個目錄", untitledMd: "未命名.md", untitledDir: "新增資料夾", fmCopyDone: "已複製", fmOk: "確定", fileTooBigSuf: " 萬字，上限 200 萬字），已阻止開啟以免長時間無回應，請拆分後再編輯。", bigLoad: "正在載入大檔案，請稍候…",
     statusSelected: "已選 {n}", extChanged: "檔案「{f}」已被其他程式修改（磁碟內容變化）。", extChangedDirty: "檔案「{f}」已被其他程式修改；本分頁有未儲存變更，重新載入將捨棄本機改動。", extDeleted: "檔案「{f}」已不存在（可能被移動或刪除）。",
-    extReload: "重新載入", extDismiss: "忽略",
+    extReload: "重新載入", extDismiss: "忽略", extAskReload: "是否載入最新的檔案內容？",
     bigDocBar: "大文件模式：編輯約 1.5 秒後生效（延遲儲存通道），儲存與復原不受影響。", bigDocBarIr: "大文件在即時渲染模式下會嚴重卡頓，建議用頂部按鈕切到所見即所得；編輯約 1.5 秒後生效。",
     tabClose: "關閉", tabCloseOthers: "關閉其它", tabCloseRight: "關閉右側", tabCloseLeft: "關閉左側", tabCloseAll: "全部關閉", tabCloseSelected: "關閉選中",
     themeTip: "介面主題：淺色 / 深色 / 護眼（未選過跟隨系統）；themes 目錄可放 Typora 社群主題",
@@ -264,7 +264,7 @@ const UI_TEXT: Record<Lang, Record<string, string>> = {
     fmDelTitle: "Delete", fmDelFileMsg: "Delete this file? This cannot be undone.", fmDelDirMsg: "Delete this folder and ALL its contents? This cannot be undone.",
     fmNoBase: "Open a file or locate a folder in the tree first", untitledMd: "Untitled.md", untitledDir: "New folder", fmCopyDone: "Copied", fmOk: "OK", fileTooBigSuf: "K chars, limit 2000K chars). Opening blocked to avoid unresponsiveness; please split the file first.", bigLoad: "Loading a large file…",
     statusSelected: "{n} selected", extChanged: "File \"{f}\" was modified by another program (disk content changed).", extChangedDirty: "File \"{f}\" was modified by another program; this tab has unsaved changes — reloading will discard them.", extDeleted: "File \"{f}\" no longer exists (moved or deleted).",
-    extReload: "Reload", extDismiss: "Ignore",
+    extReload: "Reload", extDismiss: "Ignore", extAskReload: "Load the latest file content?",
     bigDocBar: "Large-document mode: edits take effect after ~1.5s (deferred-save channel); saving and undo are unaffected.", bigDocBarIr: "Instant-render mode is extremely slow for large documents; switch to WYSIWYG via the top button. Edits take effect after ~1.5s.",
     tabClose: "Close", tabCloseOthers: "Close others", tabCloseRight: "Close to the right", tabCloseLeft: "Close to the left", tabCloseAll: "Close all", tabCloseSelected: "Close selected",
     themeTip: "Theme: light / dark / eye-care (follows system); drop Typora community themes into the themes folder",
@@ -1460,6 +1460,11 @@ function openDoc(path: string | null, content: string, name?: string, encoding?:
       return;
     }
   }
+  // v0.5.1 CRLF 归一：磁盘 CRLF 文件若原样进 doc.content，编辑器 getValue 永远是 LF 版
+  // → autosaveDirty 每轮误判 dirty → 无编辑也会静默重写文件（CRLF→LF）并覆盖外部修改
+  //（2026-09-21 外改弹窗联调实锤：弹窗挂起期 blur 自动保存把外部新版写回旧内容）。
+  // 统一在装入点归一，与 base/撤销基线同口径；保存本来就走 UTF-8 LF，无格式回写诉求。
+  content = content.replace(/\r\n/g, "\n");
   const doc: Doc = {
     id: newDocId(),
     path,
@@ -1533,11 +1538,11 @@ async function loadLazyDoc(doc: Doc, silent = false): Promise<void> {
       closeDoc(doc.id);
       return;
     }
-    doc.content = content;
+    doc.content = content.replace(/\r\n/g, "\n"); // CRLF 归一（同 openDoc，防幽灵 dirty）
     doc.encoding = enc || "";
-    doc.base = content.replace(/\r\n/g, "\n");
-    doc.large = content.length > LARGE_DOC_CHARS;
-    doc.bytes = utf8Bytes(content);
+    doc.base = doc.content;
+    doc.large = doc.content.length > LARGE_DOC_CHARS;
+    doc.bytes = utf8Bytes(doc.content);
     doc.dirty = false;
     doc.lazy = false;
     refreshMeta(doc);
@@ -1613,13 +1618,46 @@ async function refreshMeta(doc: Doc): Promise<void> {
   } catch { /* 文件暂不可读：基准不更新（下次比对仍会提示） */ }
 }
 let extBarDoc = ""; // 提示条当前指向的 docId（切换文档自动失效）
+let extAsking = false; // 外改弹窗重入锁：confirm 挂起期 focus/30s 周期再触发不叠弹
+// e2e 诊断钩子（同 __sLog 惯例，只读）：checkExternalMod/autosaveDirty 的入口与早退原因
+(window as unknown as { __cemLog: unknown[] }).__cemLog = (window as unknown as { __cemLog?: unknown[] }).__cemLog || [];
+function cemTrace(msg: string): void {
+  const l = (window as unknown as { __cemLog: unknown[] }).__cemLog;
+  l.push(Date.now() + " " + msg);
+  if (l.length > 50) l.splice(0, l.length - 50);
+}
 async function checkExternalMod(doc: Doc): Promise<void> {
-  if (!doc.path || doc.lazy || !vditor) return;
+  if (!doc.path || doc.lazy || !vditor) {
+    cemTrace(`cem-guard path=${!!doc.path} lazy=${doc.lazy} vditor=${!!vditor}`);
+    return;
+  }
+  cemTrace("cem-pass");
   try {
     const m = await invoke<{ mtimeMs: number; size: number }>("file_meta", { path: doc.path });
+    cemTrace(`cem-meta disk=(${m.mtimeMs},${m.size}) doc=(${doc.metaMtime},${doc.metaSize})`);
     if (activeDoc()?.id !== doc.id) return; // 异步回来时已切走：不弹
     const changed = doc.metaMtime !== 0 && (m.mtimeMs !== doc.metaMtime || m.size !== doc.metaSize);
-    if (changed) showExtBar(doc, false);
+    if (!changed) { cemTrace("cem-unchanged"); return; }
+    // v0.5.1 用户需求：外改弹窗问是/否（是=加载最新，否=不动）。
+    // 适用=活动文档且无本地未保存改动（dirty 时弹窗覆盖风险大，仍走黄条人工判断；非活动标签同理防连环弹）。
+    cemTrace(`cem-changed dirty=${doc.dirty} asking=${extAsking}`);
+    if (!doc.dirty && !extAsking) {
+      extAsking = true;
+      cemTrace("cem-ask-begin");
+      let ok = false;
+      try {
+        ok = (await ask(t("extChanged").replace("{f}", doc.name) + "\n\n" + t("extAskReload"))) === true;
+        cemTrace(`cem-ask-resolved ok=${ok}`);
+      } catch (e) { cemTrace(`cem-ask-err ${String(e).slice(0, 100)}`); /* dialog 失败回落黄条 */ }
+      extAsking = false;
+      if (activeDoc()?.id !== doc.id) return; // 弹窗期间切走：交回切标签时的检测
+      if (ok) { void reloadFromDisk(doc); return; }
+      // 否=不动内容；基准刷新到当前磁盘版防重复弹，黄条仍显示留"重新加载"反悔入口
+      refreshMeta(doc);
+      showExtBar(doc, false);
+      return;
+    }
+    showExtBar(doc, false);
   } catch {
     if (activeDoc()?.id === doc.id) showExtBar(doc, true); // 文件没了（被删/移走）
   }
@@ -1641,10 +1679,11 @@ function showExtBar(doc: Doc, deleted: boolean): void {
 }
 async function reloadFromDisk(doc: Doc): Promise<void> {
   try {
-    const [content, enc] = await invoke<[string, string]>("open_file", { path: doc.path });
-    if (content.length > MAX_OPEN_CHARS) { showToast(t("fileTooBig") + bigSizeLabel(content.length) + t("fileTooBigSuf"), "danger"); return; }
+    const [raw, enc] = await invoke<[string, string]>("open_file", { path: doc.path });
+    if (raw.length > MAX_OPEN_CHARS) { showToast(t("fileTooBig") + bigSizeLabel(raw.length) + t("fileTooBigSuf"), "danger"); return; }
+    const content = raw.replace(/\r\n/g, "\n"); // CRLF 归一（同 openDoc，防幽灵 dirty）
     doc.content = content;
-    doc.base = content.replace(/\r\n/g, "\n");
+    doc.base = content;
     doc.large = content.length > LARGE_DOC_CHARS;
     doc.bytes = utf8Bytes(content);
     doc.dirty = false;
@@ -3182,13 +3221,14 @@ function vditorOptions(mode: "ir" | "wysiwyg"): VditorOptions {
       rebindTableResize(); // v0.3.11 表格列宽拖动（近缘判定+持久化重应用）
       closeFind(); // 模式/语言切换销毁重建：旧匹配节点全部失效
       if (!vditorInited) {
-        // 首次初始化：处理命令行传入的文件；否则恢复上次会话（v0.3.26：标签+阅读位置），
-        // 无会话才开欢迎页。带启动文件=用户明确意图，不叠加会话（双击 .md 场景）
+        // 首次初始化：恢复上次会话（v0.3.26：标签+阅读位置），无会话才开欢迎页；
+        // 带启动文件（双击 .md）= 恢复会话后追加目标文件并激活（v0.5.1 改：v0.3.26 旧语义
+        // 「带参只开参数文件不叠会话」致用户双击第三个 md 时前两个标签凭空消失，反直觉实报）
         vditorInited = true;
         if (pendingFile) {
           const f = pendingFile;
           pendingFile = null;
-          loadFile(f);
+          void restoreSession().finally(() => loadFile(f));
         } else {
           void restoreSession().then((ok) => {
             if (!ok) openDoc(null, welcomeMd(), t("welcomeName"));
@@ -3636,9 +3676,9 @@ async function saveAllDirty() {
 const AUTOSAVE_INTERVAL_MS = 30_000;
 let autosaveTimer: number | undefined;
 async function autosaveDirty(): Promise<void> {
-  if (!vditor) return;
-  if (switchApplyPending) return; // v0.3.25 大文档切换装载期：此刻 mdValue 取到的是旧文档，本轮跳过
-  if (activeDoc()?.lazy || activeDoc()?.loading) return; // v0.3.26 惰性装载窗口：同上，防把旧文档写进占位标签
+  if (!vditor) { cemTrace("as-guard vditor"); return; }
+  if (switchApplyPending) { cemTrace("as-guard switchApplyPending"); return; } // v0.3.25 大文档切换装载期：此刻 mdValue 取到的是旧文档，本轮跳过
+  if (activeDoc()?.lazy || activeDoc()?.loading) { cemTrace("as-guard lazy/loading"); return; } // v0.3.26 惰性装载窗口：同上，防把旧文档写进占位标签
   // 兜底：键入后立刻失焦时，Vditor input 回调可能仍在防抖窗口内未跑（dirty 未置位）——
   // 主动从编辑器取真值对比，不等 input 回调（fullcheck A11b 实证：type 后立即 blur 会漏存最后一段）
   const a = activeDoc();
@@ -3665,6 +3705,10 @@ async function autosaveDirty(): Promise<void> {
       if (activeDoc()?.id === doc.id) { updateTitle(); renderTabs(); }
     } catch { /* 静默失败：dirty 保留，下轮重试 */ }
   }
+  // v0.5.1 外改感知增强：30s 周期顺带核活动文档（用户开着编辑器时文件在外部被改，
+  // 无需切标签/切窗口也能弹窗知道；自身保存后基准已刷新，不会误报自己）
+  const act = activeDoc();
+  if (act && !act.dirty) void checkExternalMod(act);
 }
 function startAutosave() {
   if (autosaveTimer !== undefined) return;

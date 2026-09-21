@@ -25,7 +25,11 @@
 | 便携模式（lib.rs portable_dir/data_root/settings·main.ts pref 层·v0.5.0） | cargo test + P 组 |
 | lib.rs（Rust 命令） | cargo test + 相关组 |
 
-P 组脚本：`output/md-editor-portable-v050/e2e_portable_v050.py`（P1 启动三落点/P2 语言→settings.json/P3 重启持久/P4 安装版回归/P5 zip 结构；**跑时 TEMP/TMP 指回 C 盘**——J 组 2026-09-21 实锤：TEMP 落 F 盘时树展开 list_md_dir 受 F 盘 IO 挂起病灶牵连假挂）。J 组同日基线对照：J2a/J10 两断言 v0.4.12 同挂=存量漂移（#theme-select 引用过期+树高亮断言漂移），非产品回归，待修脚本。
+P 组脚本：`output/md-editor-portable-v050/e2e_portable_v050.py`（P1 启动三落点/P2 语言→settings.json/P3 重启持久/P4 安装版回归/P5 zip 结构；**跑时 TEMP/TMP 指回 C 盘**——J 组 2026-09-21 实锤：TEMP 落 F 盘时树展开 list_md_dir 受 F 盘 IO 挂起病灶牵连假挂）。
+
+2026-09-21 J 脚本存量漂移已修（17/18）：#theme-select（v0.3.x UI）→ #sb-theme+#theme-menu 按钮点击；J10/J10b 断言改现设计（浅色 H1=墨色 #16181d，分级配色在护眼主题 #1a5e8a）。**v0.5.1 起会话语义变更：带参启动=恢复会话+追加参数文件**（旧=只开参数文件）——J0 前置需先备份并删除 %APPDATA%\com.github.frandy820.md-editor\ui-state.json（跑完恢复），否则残留会话污染四标签断言。剩 J2a（树高亮）仍漂移待查。
+
+v0.5.1 专项脚本（output/md-editor-portable-v050/）：verify_v051_session_startup.py（S1-S5 会话语义+T1 启动耗时）；verify_v051_ahk.py+ahk_v051_extmod.ahk（A1/A2 外改弹窗真实点击是/否+A3 键入+^s，**AHK 窗口匹配必须写 `ahk_class #32770` 前缀——裸 "#32770" 是标题匹配永远 MISS**）；e2e_user_flow_v051.py（用户流 8 场景对 v0.5.1 zip）。
 
 ## 三、冒烟集命令
 
