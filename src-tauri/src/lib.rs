@@ -221,7 +221,7 @@ fn open_file(path: String) -> Result<(String, String), String> {
 
 /// 写文件，统一 UTF-8 无 BOM；临时文件 + rename 原子写，避免写入中断损坏原文件
 #[tauri::command]
-fn save_file(path: String, content: String) -> Result<(), String> {
+fn save_file(path: String, content: String) -> Result<FileMeta, String> {
     if !has_allowed_ext(&path) {
         return Err("不支持的保存路径（仅 md/markdown/mdown/txt）".into());
     }
@@ -236,15 +236,27 @@ fn save_file(path: String, content: String) -> Result<(), String> {
     }
     archive_old_version(&path); // v0.3.11 覆盖前归档旧版（best-effort）
     let tmp = format!("{}.tmp", path);
-    fs::write(&tmp, &content).map_err(|e| {
-        app_log("ERROR", "save", &format!("写入失败 {path}: {e}"));
-        e.to_string()
-    })?;
-    // 同目录 rename 在 Windows 上原子覆盖目标文件
-    fs::rename(&tmp, &path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        e.to_string()
-    })
+    // v0.5.2：句柄写入 + 在句柄上取元数据随结果返回。rename 刚落地时按路径读元数据可能短暂
+    // 命中旧目录项（实测旧版前端 refreshMeta 把旧 mtime/size 存成外改基准且不再刷新，下一轮
+    // 检测即误弹「文件已被外部修改」）。句柄元数据（GetFileInformationByHandle）描述的正是
+    // 本次写入的字节，权威无缓存；前端保存后直接以它为基准，不再单独回读。
+    {
+        use std::io::Write;
+        let write_err = |e: std::io::Error| {
+            app_log("ERROR", "save", &format!("写入失败 {path}: {e}"));
+            e.to_string()
+        };
+        let mut f = fs::File::create(&tmp).map_err(write_err)?;
+        f.write_all(content.as_bytes()).map_err(write_err)?;
+        let meta = f.metadata().map_err(|e| e.to_string())?;
+        drop(f); // Windows 上 rename 前必须先关句柄
+        // 同目录 rename 在 Windows 上原子覆盖目标文件
+        fs::rename(&tmp, &path).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            e.to_string()
+        })?;
+        Ok(meta_to_file_meta(&meta))
+    }
 }
 
 // ===== v0.3.11 版本历史/文件恢复 =====
@@ -843,7 +855,7 @@ fn export_selftest_dir() -> Option<String> {
 }
 
 // ===== v0.3.26 外部修改检测：读文件元信息（mtime+size），前端比对是否被其他程序改动 =====
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Debug)]
 struct FileMeta {
     #[serde(rename = "mtimeMs")]
     mtime_ms: u64,
@@ -853,13 +865,18 @@ struct FileMeta {
 #[tauri::command]
 fn file_meta(path: String) -> Result<FileMeta, String> {
     let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
+    Ok(meta_to_file_meta(&meta))
+}
+
+/// Metadata → FileMeta 统一换算（file_meta 路径读与 save_file 句柄读共用）
+fn meta_to_file_meta(meta: &fs::Metadata) -> FileMeta {
     let mtime_ms = meta
         .modified()
         .ok()
         .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    Ok(FileMeta { mtime_ms, size: meta.len() })
+    FileMeta { mtime_ms, size: meta.len() }
 }
 
 // ===== UI 状态持久化（显示比例等）：写 %APPDATA%/<identifier>/ui-state.json =====
@@ -2260,6 +2277,23 @@ mod tests {
         assert_eq!(fs::read_to_string(&p).unwrap(), "新内容覆盖");
         // rename 成功后临时文件不应残留
         assert!(!dir.join("s.md.tmp").exists(), "tmp 不应残留");
+    }
+
+    #[test]
+    fn save_file_returns_fresh_meta() {
+        // v0.5.2 保存后误弹外改弹窗修复：save_file 返回句柄元数据（mtime/size），必须与
+        // 落盘后按路径读到的一致——前端直接以它为外改检测基准，错位即误弹/漏检
+        let dir = tempdir();
+        let p = dir.join("sm.md");
+        let m1 = save_file(p.to_str().unwrap().to_string(), "v1".to_string()).unwrap();
+        assert_eq!(m1.size, 2, "size 应为写入字节数");
+        let disk = file_meta(p.to_str().unwrap().to_string()).unwrap();
+        assert_eq!(disk.mtime_ms, m1.mtime_ms, "句柄元数据与路径读取的 mtime 应一致");
+        assert_eq!(disk.size, m1.size, "句柄元数据与路径读取的 size 应一致");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let m2 = save_file(p.to_str().unwrap().to_string(), "v2-longer".to_string()).unwrap();
+        assert!(m2.mtime_ms >= m1.mtime_ms, "mtime 不应倒退");
+        assert_eq!(m2.size, 9);
     }
 
     #[test]

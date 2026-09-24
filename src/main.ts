@@ -1638,6 +1638,19 @@ async function checkExternalMod(doc: Doc): Promise<void> {
     if (activeDoc()?.id !== doc.id) return; // 异步回来时已切走：不弹
     const changed = doc.metaMtime !== 0 && (m.mtimeMs !== doc.metaMtime || m.size !== doc.metaSize);
     if (!changed) { cemTrace("cem-unchanged"); return; }
+    // v0.5.2 内容兜底：meta 变化 ≠ 内容变化——保存基准同步前的窗口、touch/同内容重写工具都
+    // 只让 mtime/size 读数漂移。先读内容与编辑器比对，一致则静默对齐基准返回（不弹窗不打扰），
+    // 真不一致才进入下面的弹窗/黄条流程。
+    try {
+      const [raw] = await invoke<[string, string]>("open_file", { path: doc.path });
+      if (activeDoc()?.id !== doc.id) return; // 异步回来时已切走：不弹
+      if (raw.replace(/\r\n/g, "\n") === doc.content) {
+        cemTrace("cem-same-content");
+        doc.metaMtime = m.mtimeMs; doc.metaSize = m.size; // 直接用本轮读数对齐，省一次回读
+        return;
+      }
+      cemTrace("cem-content-diff");
+    } catch { cemTrace("cem-read-err"); /* 内容读失败（占用等）：按 meta 差异走原流程 */ }
     // v0.5.1 用户需求：外改弹窗问是/否（是=加载最新，否=不动）。
     // 适用=活动文档且无本地未保存改动（dirty 时弹窗覆盖风险大，仍走黄条人工判断；非活动标签同理防连环弹）。
     cemTrace(`cem-changed dirty=${doc.dirty} asking=${extAsking}`);
@@ -3586,11 +3599,14 @@ async function saveDoc(doc: Doc): Promise<boolean> {
     return false;
   }
   try {
-    await invoke("save_file", { path, content: doc.content });
+    const sm = await invoke<{ mtimeMs: number; size: number }>("save_file", { path, content: doc.content });
     doc.dirty = false;
     doc.base = doc.content; // v0.3.21 撤销栈的干净态基线跟随保存
     doc.bytes = utf8Bytes(doc.content); // v0.3.26 状态栏大小
-    refreshMeta(doc); // v0.3.26 保存后刷新外改基准（自己的写也变 mtime，不刷会立即误报）
+    // v0.5.2 外改基准=保存结果返回的句柄元数据：rename 落地瞬间按路径回读可能拿到旧目录项
+    //（旧版 refreshMeta 误存旧值且不再刷新，是保存后误弹「已被外部修改」的根因）
+    doc.metaMtime = sm.mtimeMs;
+    doc.metaSize = sm.size;
     scheduleSessionSave();
     return true;
   } catch (e) {
@@ -3601,7 +3617,7 @@ async function saveDoc(doc: Doc): Promise<boolean> {
 
 // v0.4.11 另存为（多格式）：MD=写新路径、当前文档切到新文件（旧文件不动，Typora 同语义）；
 // PDF/HTML/PNG/DOCX=导出副本（当前文档不动）——转发既有导出按钮 + pickExportPath 路径注入，
-// 进度遮罩/公式渲染/嵌图/空文档确认/PDF 关联源全链零复制复用。
+// 进度遮罩/公式渲染/嵌图/空文档确认全链零复制复用。
 // 路径选择：生产=saveDialog（保存类型多选）；e2e 自测=export_selftest_dir 同模式跳过对话框
 async function pickSaveAsPath(doc: Doc): Promise<string | null> {
   try {
@@ -3644,14 +3660,14 @@ async function saveDocAs(doc: Doc): Promise<boolean> {
   const dup = docs.find((d) => d !== doc && d.path && d.path.toLowerCase() === path.toLowerCase());
   if (dup) { showToast(t("saveAsDupTab") + dup.name, "info"); return false; }
   try {
-    await invoke("save_file", { path, content: doc.content });
+    const sm = await invoke<{ mtimeMs: number; size: number }>("save_file", { path, content: doc.content });
     doc.path = path;
     doc.name = path.split(/[\\/]/).pop()!;
     doc.dirty = false;
     doc.base = doc.content; // 撤销栈干净态基线跟随（同 saveDoc）
     doc.encoding = "UTF-8"; // 统一写 UTF-8 无 BOM（同手动保存）
     doc.bytes = utf8Bytes(doc.content);
-    refreshMeta(doc); // 外改基准跟随新路径
+    doc.metaMtime = sm.mtimeMs; doc.metaSize = sm.size; // v0.5.2 外改基准=保存返回的句柄元数据（同 saveDoc）
     pushRecent(path);
     renderTabs();
     updateTitle();
@@ -3697,10 +3713,10 @@ async function autosaveDirty(): Promise<void> {
     }
     if (doc.content === "") continue;
     try {
-      await invoke("save_file", { path: doc.path, content: doc.content });
+      const sm = await invoke<{ mtimeMs: number; size: number }>("save_file", { path: doc.path, content: doc.content });
       doc.dirty = false;
       doc.encoding = "UTF-8"; // 统一写 UTF-8 无 BOM（同手动保存）
-      refreshMeta(doc); // v0.3.26 自动保存同样刷新外改基准
+      doc.metaMtime = sm.mtimeMs; doc.metaSize = sm.size; // v0.5.2 外改基准=保存返回的句柄元数据（同 saveDoc）
       doc.bytes = utf8Bytes(doc.content);
       if (activeDoc()?.id === doc.id) { updateTitle(); renderTabs(); }
     } catch { /* 静默失败：dirty 保留，下轮重试 */ }
@@ -5441,17 +5457,8 @@ async function exportPdf(pathOverride?: string) {
     });
     await invoke("export_pdf", { html: fullHtml, path: savePath });
     done = true;
-    // P1 关联源：把当前 md 源复制到 PDF 同目录同名 .md，使以后打开此 PDF 时 find_pdf_source 能命中回到源
-    if (doc.path) {
-      const pdfDir = savePath.replace(/\\/g, "/").replace(/\/[^/]*$/, "");
-      const stem = (doc.name || t("untitled")).replace(/\.[^.]+$/, "");
-      const srcCopy = pdfDir + "/" + stem + ".md";
-      const norm = (s: string) => s.replace(/\\/g, "/").toLowerCase();
-      if (norm(doc.path) !== norm(srcCopy) && doc.content) {
-        try { await invoke("save_file", { path: srcCopy, content: doc.content }); }
-        catch { /* 关联源副本失败不阻断导出（目标可能被占用等） */ }
-      }
-    }
+    // v0.5.2：删除 v0.3.0 的「关联源」伴生 .md 副本——导出 PDF 只要 PDF（用户反馈）；
+    // 打开 PDF 找源的 find_pdf_source 对磁盘上真实存在的同名 .md 依然有效
     stopEst();
     setPct(100);
     if (exportMsg) exportMsg.textContent = currentLang === "en" ? "Exported." : currentLang === "zh-TW" ? "匯出完成。" : "导出完成。";
@@ -5697,9 +5704,10 @@ async function boot() {
       doc.name = path.split(/[\\/]/).pop()!;
     }
     try {
-      await invoke("save_file", { path, content: doc.content });
+      const sm = await invoke<{ mtimeMs: number; size: number }>("save_file", { path, content: doc.content });
       doc.dirty = false;
       doc.encoding = "UTF-8"; // 统一写 UTF-8 无 BOM，刷新标记避免与原编码矛盾
+      doc.metaMtime = sm.mtimeMs; doc.metaSize = sm.size; // v0.5.2 外改基准（同 saveDoc）
       updateTitle();
       renderTabs();
     } catch (e) {
