@@ -1,71 +1,71 @@
-# MD 编辑器测试方案（v0.3.21 起）
+# MD Editor test plan (since v0.3.21)
 
-> 目标：新功能进来先冒烟、后回归；真实用户行为用 AHK 模拟（OS 级键鼠），功能断言走 CDP/文件系统硬校验。
-> 本文是唯一入口：改任何功能前先看「模块→组映射」，改完跑对应组 + 冒烟集。
+> Goal: new features get a smoke run first, then regression; real user behaviour is simulated with AHK (OS-level keyboard/mouse), feature assertions are hard checks via CDP / the file system.
+> This is the single entry point: before changing any feature, read the "module → group map", then run the matching groups + the smoke set.
 
-## 一、五层体系
+## 1. Five-layer system
 
-| 层 | 内容 | 触发时机 | 耗时 |
+| Layer | Content | When | Time |
 |---|---|---|---|
-| L0 | `cd src-tauri && cargo test`（49 用例） | 每次改 Rust | ~10s |
-| L1 | 冒烟集：`e2e_user_J_v0321.py` + `ahk_smoke_v1.ahk` | 每次交付/部署 | ~3min |
-| L2 | 专项回归：按「模块→组映射」跑受影响组 | 改动对应模块时 | 每组 ~1min |
-| L3 | 全量：B/C/D/E/F/G/H/I/J + `e2e_fullcheck_v037.py` | 发版前 | ~15min |
-| L4 | AHK 真实键鼠：`ahk_smoke_v1.ahk`（6 断言） | 发版前（需桌面在线） | ~2min |
+| L0 | `cd src-tauri && cargo test` (49 cases) | every Rust change | ~10s |
+| L1 | Smoke set: `e2e_user_J_v0321.py` + `ahk_smoke_v1.ahk` | every delivery/deploy | ~3min |
+| L2 | Targeted regression: run affected groups per the "module → group map" | when a mapped module changes | ~1min per group |
+| L3 | Full: B/C/D/E/F/G/H/I/J + `e2e_fullcheck_v037.py` | before release | ~15min |
+| L4 | AHK real keyboard/mouse: `ahk_smoke_v1.ahk` (6 assertions) | before release (desktop must be online) | ~2min |
 
-## 二、模块→组映射
+## 2. Module → group map
 
-| 改动模块 | 必跑 |
+| Changed module | Must run |
 |---|---|
-| 撤销/保存/自动保存（main.ts snap*/saveDoc/autosaveDirty） | B、fullcheck(A11)、AHK |
-| 标签页（renderTabs/多选/溢出） | B、J |
-| 文件树/ES 搜索/定位（makeTreeNode/runEsSearch/esLocateTree） | E、H、I、J |
-| 主题/样式（styles.css/applyTheme） | D、J |
-| 导出/打印 | fullcheck(E)、C |
-| 便携模式（lib.rs portable_dir/data_root/settings·main.ts pref 层·v0.5.0） | cargo test + P 组 |
-| lib.rs（Rust 命令） | cargo test + 相关组 |
+| Undo/save/autosave (main.ts snap*/saveDoc/autosaveDirty) | B, fullcheck(A11), AHK |
+| Tabs (renderTabs/multi-select/overflow) | B, J |
+| File tree / ES search / locate (makeTreeNode/runEsSearch/esLocateTree) | E, H, I, J |
+| Themes/styles (styles.css/applyTheme) | D, J |
+| Export/print | fullcheck(E), C |
+| Portable mode (lib.rs portable_dir/data_root/settings · main.ts pref layer · v0.5.0) | cargo test + group P |
+| lib.rs (Rust commands) | cargo test + related groups |
 
-P 组脚本：`output/md-editor-portable-v050/e2e_portable_v050.py`（P1 启动三落点/P2 语言→settings.json/P3 重启持久/P4 安装版回归/P5 zip 结构；**跑时 TEMP/TMP 指回 C 盘**——J 组 2026-09-21 实锤：TEMP 落 F 盘时树展开 list_md_dir 受 F 盘 IO 挂起病灶牵连假挂）。
+Group P script: `output/md-editor-portable-v050/e2e_portable_v050.py` (P1 three startup locations / P2 language → settings.json / P3 restart persistence / P4 installed-version regression / P5 zip structure; **point TEMP/TMP back to drive C when running** — confirmed by group J on 2026-09-21: with TEMP on drive F, tree expansion list_md_dir got caught by the F-drive IO hang and falsely hung).
 
-2026-09-21 J 脚本存量漂移已修（17/18）：#theme-select（v0.3.x UI）→ #sb-theme+#theme-menu 按钮点击；J10/J10b 断言改现设计（浅色 H1=墨色 #16181d，分级配色在护眼主题 #1a5e8a）。**v0.5.1 起会话语义变更：带参启动=恢复会话+追加参数文件**（旧=只开参数文件）——J0 前置需先备份并删除 %APPDATA%\com.github.frandy820.md-editor\ui-state.json（跑完恢复），否则残留会话污染四标签断言。剩 J2a（树高亮）仍漂移待查。
+2026-09-21 J script drift fixed (17/18): #theme-select (v0.3.x UI) → click #sb-theme + #theme-menu buttons; J10/J10b assertions updated to the current design (light H1 = ink #16181d, graded colours in the eye-care theme #1a5e8a). **Since v0.5.1 session semantics changed: launching with an argument = restore session + append the argument file** (previously = open only the argument file) — J0 setup must back up and delete %APPDATA%\com.github.frandy820.md-editor\ui-state.json (restore afterwards), otherwise the leftover session pollutes the four-tab assertion. J2a (tree highlight) still drifts, to be investigated.
 
-v0.5.1 专项脚本（output/md-editor-portable-v050/）：verify_v051_session_startup.py（S1-S5 会话语义+T1 启动耗时）；verify_v051_ahk.py+ahk_v051_extmod.ahk（A1/A2 外改弹窗真实点击是/否+A3 键入+^s，**AHK 窗口匹配必须写 `ahk_class #32770` 前缀——裸 "#32770" 是标题匹配永远 MISS**）；e2e_user_flow_v051.py（用户流 8 场景对 v0.5.1 zip）。
+v0.5.1 targeted scripts (output/md-editor-portable-v050/): verify_v051_session_startup.py (S1-S5 session semantics + T1 startup time); verify_v051_ahk.py + ahk_v051_extmod.ahk (A1/A2 real clicks on the external-change yes/no dialog + A3 typing + ^s, **AHK window matching must use the `ahk_class #32770` prefix — a bare "#32770" is a title match and always MISSES**); e2e_user_flow_v051.py (8 user-flow scenarios against the v0.5.1 zip).
 
-## 三、冒烟集命令
+## 3. Smoke set commands
 
 ```bash
 cd output/md-editor-typora-scan
-python e2e_user_J_v0321.py          # 18 断言（v0.3.21 全功能）
-"/c/Program Files/AutoHotkey/v2/AutoHotkey64.exe" ahk_smoke_v1.ahk   # 需桌面在线
+python e2e_user_J_v0321.py          # 18 assertions (v0.3.21 full feature set)
+"/c/Program Files/AutoHotkey/v2/AutoHotkey64.exe" ahk_smoke_v1.ahk   # desktop must be online
 ```
 
-## 四、AHK 脚本说明（ahk_smoke_v1.ahk）
+## 4. AHK script notes (ahk_smoke_v1.ahk)
 
-- 6 断言：键入+^S / ^Z 一步撤销 / ^Y 重做 / 失焦自动保存 / 双击标签新建+另存对话框 / 干净退出。
-- 断言走真实副作用（文件内容/另存对话框/进程存活），不注入页面 JS。2026-08-30 全 6 PASS 实测通过。
-- **脚本编码必须是 UTF-8 带 BOM**（AHK v2 无 BOM 按 ANSI 读，中文断言字面量全废=假 FAIL）。
-- **键入一律纯数字**（如 1357924680）：中文拼音 IME 会把字母序列逐个组合成中文（"ahktyped123"→"安徽空调也碰到23"），数字直通无组合。
-- **前置条件：RDP 输入通道在线**——会话「运行中」≠通道通（实测时通时断）：键入零进入+文件全程纯基线=通道断了，等用户桌面真正活跃再跑；通道断时 SendInput/SendEvent/keybd_event 三层全失效。
-- **另存对话框路径输入用剪贴板粘贴**（`A_Clipboard := path; Send "^v"`）：Send 打路径会被 IME/焦点层吞。
-- 失焦用 `WinActivate ahk_class Progman`（点桌面固定坐标会弹开始菜单遮挡窗口）；窗口位置尺寸每轮会漂（产品记住上次窗口），坐标断言只用相对客户区计算。
-- 诊断钩子（页面内）：`window.__zTrace`（z/y keydown 守卫状态）、`window.__sLog`（每次保存的取值+栈深）、`window.__mdDocs`（docs 只读）、`window.__mdUndo/__mdRedo`。
+- 6 assertions: type + ^S / ^Z one-step undo / ^Y redo / autosave on blur / double-click tab bar new + Save As dialog / clean exit.
+- Assertions use real side effects (file content / Save As dialog / process alive), no page JS injection. All 6 PASS on 2026-08-30.
+- **Script encoding must be UTF-8 with BOM** (AHK v2 reads BOM-less files as ANSI, so non-ASCII assertion literals break = false FAIL).
+- **Always type digits only** (e.g. 1357924680): a pinyin IME composes letter sequences into other characters, digits pass straight through.
+- **Prerequisite: the RDP input channel is online** — session "running" ≠ channel connected (flaky in practice): zero characters typed + file at pure baseline = channel down; wait until the user desktop is truly active; when down, SendInput/SendEvent/keybd_event all fail.
+- **Enter the Save As dialog path by clipboard paste** (`A_Clipboard := path; Send "^v"`): typing the path with Send gets swallowed by the IME/focus layer.
+- Blur with `WinActivate ahk_class Progman` (clicking fixed desktop coordinates opens the Start menu over the window); window position/size drift each run (the app remembers its last window), so coordinate assertions only use client-relative maths.
+- Diagnostic hooks (in page): `window.__zTrace` (z/y keydown guard state), `window.__sLog` (value + stack depth on every save), `window.__mdDocs` (docs, read-only), `window.__mdUndo/__mdRedo`.
 
-## 五、新功能接入铁律
+## 5. Rules for new features
 
-1. 新功能先在最新组（当前 J）加断言，或开新组 K/L…，断言必须走硬校验（文件内容/DOM 几何/进程状态），禁止只查元素存在。
-2. 改键盘交互的功能必须过 AHK（CDP 对带修饰键字母键有盲区：z 丢、s 能到；合成 KeyboardEvent 被 Vditor 元素层拦截）。
-3. 测试钩子：`window.__mdUndo/__mdRedo/__mdDocs`（只读），e2e 用，不进用户文档。
-4. 部署链：`npm run build` → `cd src-tauri && cargo build --release --bins --features tauri/custom-protocol` → cp 到 F:\software（md5 比对）。
-5. **fullcheck 等长脚本的元素引用随版本更新**（教训：#file-title 在 v0.3.16 被撤掉，脚本没跟，D4a 假阴两版）。
+1. Add assertions for a new feature to the latest group (currently J) or open a new group K/L…; assertions must be hard checks (file content / DOM geometry / process state), never just "element exists".
+2. Features that change keyboard interaction must pass AHK (CDP has blind spots for modifier + letter keys: z is lost, s gets through; synthetic KeyboardEvents are intercepted by the Vditor element layer).
+3. Test hooks: `window.__mdUndo/__mdRedo/__mdDocs` (read-only), for e2e only, never written into user documents.
+4. Deploy chain: `npm run build` → `cd src-tauri && cargo build --release --bins --features tauri/custom-protocol` → copy to F:\software (md5 compare).
+5. **Element references in long scripts like fullcheck must follow version changes** (lesson: #file-title was removed in v0.3.16, the script did not follow, D4a gave false negatives for two versions).
 
-## 六、七大测试盲区对策（历史教训沉淀）
+## 6. Seven test blind spots and countermeasures (lessons learned)
 
-| 盲区 | 对策 |
+| Blind spot | Countermeasure |
 |---|---|
-| CDP 带修饰键字母丢键 | 真键盘行为只在 AHK 层验证 |
-| 合成事件被元素层拦截 | 产品暴露 __md* 测试钩子绕过 |
-| 中文 SendText 后 isComposing 残留 | AHK 键入一律英文+SetEng() |
-| 窗口标题不随 document.title 同步 | 断言用 ahk_exe/类名，不用标题 |
-| mkdtemp 不自清 | 脚本开头 rmtree 清残留 |
-| localStorage 持久化污染基线 | 断言前显式清 |
-| e2e 假绿（skip/超时即过） | 看 tail 汇总数，逐 FAIL 归零 |
+| CDP drops modifier + letter keys | verify real keyboard behaviour only at the AHK layer |
+| Synthetic events intercepted by the element layer | the app exposes __md* test hooks to bypass |
+| isComposing left over after non-ASCII SendText | AHK always types English + SetEng() |
+| Window title does not follow document.title | assert with ahk_exe / class name, not the title |
+| mkdtemp does not clean itself | rmtree leftovers at script start |
+| localStorage persistence pollutes the baseline | clear explicitly before asserting |
+| e2e false green (skip/timeout counts as pass) | read the tail summary, drive every FAIL to zero |

@@ -27,7 +27,7 @@ export default {
   'export': 'Export',
   'fileTypeError': 'file type is error',
   'footnoteRef': 'Footnote Ref',
-  'fullscreen': 'Toggle Fullscreen',
+  'fullscreen': 'Reader mode',
   'generate': 'Generating',
   'headings': 'Headings',
   'heading1': 'Heading 1',

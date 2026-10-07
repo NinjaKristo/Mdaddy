@@ -1,0 +1,28 @@
+import os, sys, tempfile, time, json
+from cdp import App
+tmp = tempfile.mkdtemp(prefix="mdaddy-undo-")
+md = os.path.join(tmp, "u.md")
+open(md, "w", encoding="utf-8").write("# T\n\n" + "\n\n".join(f"Paragraph number {i} text here." for i in range(1, 61)) + "\n")
+app = App([md])
+try:
+    app.wait("document.querySelector('#editor .vditor-reset')?.innerText.includes('Paragraph number 60')", 30)
+    app.js("document.getElementById('shortcut-screen')?.remove()")
+    st = lambda: json.loads(app.js("JSON.stringify(window.__mdDocs.map(d => [d.name, d.undoStack.length, d.redoStack.length, d.dirty]))"))
+    print("before", st())
+    app.js("""(() => { const p = [...document.querySelectorAll('#editor .vditor-reset p')].find(p => p.textContent.startsWith('Paragraph number 2 ')); const r = document.createRange(); r.setStart(p.firstChild, 9); r.collapse(true); const s = getSelection(); s.removeAllRanges(); s.addRange(r); document.querySelector('#editor .vditor-reset').focus(); })()""")
+    print("active", app.js("document.activeElement.className"))
+    app.send("Input.insertText", {"text": "ZZZTYPED "})
+    time.sleep(2.5)
+    print("after type", st(), app.js("document.querySelector('#editor .vditor-reset').innerText.includes('ZZZTYPED')"))
+    d = json.loads(app.js("JSON.stringify((() => { const d = window.__mdDocs.find(x => x.undoStack.length); const cur = d.content; return d.undoStack.map(v => { let p = 0; while (p < v.length && v[p] === cur[p]) p++; return [p, v.length, cur.length, JSON.stringify(v.slice(Math.max(0,p-10), p+15)), JSON.stringify(cur.slice(Math.max(0,p-10), p+15))]; }); })())"))
+    print("stack diffs vs current", d)
+    app.js("window.__mdUndo()")
+    time.sleep(1)
+    print("after undo1", st(), app.js("document.querySelector('#editor .vditor-reset').innerText.includes('ZZZ')"))
+    print("caret1", app.js("(() => { const n = getSelection().anchorNode; const el = n && (n.nodeType===1?n:n.parentElement); return el ? el.closest('p,h1')?.textContent.slice(0,30) : null; })()"))
+    app.js("window.__mdUndo()")
+    time.sleep(1)
+    print("after undo", st(), app.js("document.querySelector('#editor .vditor-reset').innerText.includes('ZZZTYPED')"))
+    print("caret", app.js("(() => { const n = getSelection().anchorNode; const el = n && (n.nodeType===1?n:n.parentElement); return el ? el.closest('p,h1')?.textContent.slice(0,30) : null; })()"))
+finally:
+    app.close()

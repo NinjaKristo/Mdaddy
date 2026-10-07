@@ -1,28 +1,48 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
 use std::time::{Duration, Instant};
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-/// 启动时从命令行参数传入的文件路径
+mod extras;
+
+/// File path passed on the command line at startup
 struct StartupFile(Mutex<Option<String>>);
 
-// ===== v0.3.23 运行日志（零观测根修：报障从口述复现变带日志自证）=====
-// %APPDATA%\md-editor\logs\md-editor.log，单文件滚动（>512KB 轮转 .log.1/.log.2，留三代）。
-// 启动首行=版本+系统+启动参数（run() 最先调用，覆盖开机第一行不留观测盲区）。
-// panic hook 落盘崩溃位置（release 保留 panic Location 行号）——白屏/闪退可自证。
-// 纯本机文件，无任何网络上报（离线个人工具定位不变）。
+#[derive(Default)]
+struct InstanceRequests(Mutex<Vec<PendingInstanceRequest>>);
+
+struct PendingInstanceRequest {
+    id: u64,
+    args: Vec<String>,
+    cwd: PathBuf,
+    shown: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct InstancePromptRequest {
+    id: u64,
+}
+
+static NEXT_INSTANCE_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+// ===== v0.3.23 run log (root fix for zero observability: bug reports go from verbal repro to self-evident logs) =====
+// %APPDATA%\Mdaddy\logs\md-editor.log, single rolling file (>512KB rotates to .log.1/.log.2, three generations kept).
+// First line at startup = version + system + launch args (run() calls it first, so the very first line leaves no blind spot).
+// The panic hook writes the crash location to disk (release keeps panic Location line numbers) — white screens/crashes prove themselves.
+// Purely local files, no network reporting at all (still an offline personal tool).
 static LOG_W: Mutex<()> = Mutex::new(());
 
-// ===== v0.5.0 便携模式：exe 旁存在 Data 目录 → 数据全部跟 exe 走（U盘场景） =====
-// 判据同 VS Code portable 惯例（data 目录在即启用）。跟 Data 走的：ui-state.json /
-// themes/ / pasted/ / logs/ / settings.json（UI 偏好）；不跟的：全盘索引缓存→%TEMP%
-// （索引对象是本机磁盘的文件名，跟U盘走换机后会载入另一台机器的陈旧索引）。
-// 安装版（exe 旁无 Data）行为完全不变，仍走 %APPDATA%。
+// ===== v0.5.0 portable mode: a Data folder next to the exe → all data travels with the exe (USB drive use) =====
+// Same rule as the VS Code portable convention (enabled when the data folder exists). Travels with Data: ui-state.json /
+// themes/ / pasted/ / logs/ / settings.json (UI preferences); does not: the drive index cache → %TEMP%
+// (the index holds this machine's file names; carried on a USB drive it would load a stale index on another machine).
+// The installed version (no Data next to the exe) behaves exactly as before and still uses %APPDATA%.
 static PORTABLE_DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
-/// 判定核心（可单测）：给定 exe 路径，返回其旁 Data 目录（存在即便携）
+/// Core rule (unit-testable): given the exe path, return the Data folder next to it (exists = portable)
 fn portable_dir_at(exe: &std::path::Path) -> Option<PathBuf> {
     let d = exe.parent()?.join("Data");
     d.is_dir().then(|| d)
@@ -34,7 +54,7 @@ fn portable_dir() -> Option<&'static PathBuf> {
         .as_ref()
 }
 
-/// 便携模式则返回 exe 旁 Data 目录的绝对路径（日志用；clone 免生命周期耦合）
+/// In portable mode, return the absolute path of the Data folder next to the exe (for logging; clone avoids lifetime coupling)
 fn portable_dir_owned() -> Option<PathBuf> {
     portable_dir().cloned()
 }
@@ -44,10 +64,10 @@ fn logs_dir() -> PathBuf {
         return d.join("logs");
     }
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("md-editor").join("logs")
+    PathBuf::from(base).join("Mdaddy").join("logs")
 }
 
-/// 本地(UTC+8) yyyy-MM-dd HH:mm:ss（与 local_ts 同换算）
+/// Local (UTC+8) yyyy-MM-dd HH:mm:ss (same conversion as local_ts)
 fn log_ts() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -59,20 +79,20 @@ fn log_ts() -> String {
     format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
 }
 
-/// 追加一行日志（失败静默：日志系统绝不能反过来打断主流程）
+/// Append one log line (fails silently: the log system must never interrupt the main flow)
 pub fn app_log(level: &str, scope: &str, msg: &str) {
     let _g = LOG_W.lock().unwrap();
     let dir = logs_dir();
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let path = dir.join("md-editor.log");
-    // 滚动：>512KB → .log.2 删、.log.1→.log.2、主→.log.1
+    let path = dir.join("mdaddy.log");
+    // Rotation: >512KB → delete .log.2, .log.1 → .log.2, main → .log.1
     if let Ok(meta) = fs::metadata(&path) {
         if meta.len() > 512 * 1024 {
-            let _ = fs::remove_file(dir.join("md-editor.log.2"));
-            let _ = fs::rename(dir.join("md-editor.log.1"), dir.join("md-editor.log.2"));
-            let _ = fs::rename(&path, dir.join("md-editor.log.1"));
+            let _ = fs::remove_file(dir.join("mdaddy.log.2"));
+            let _ = fs::rename(dir.join("mdaddy.log.1"), dir.join("mdaddy.log.2"));
+            let _ = fs::rename(&path, dir.join("mdaddy.log.1"));
         }
     }
     let line = format!("[{}] [{}] [{}] {}\n", log_ts(), level, scope, msg.replace('\n', " | "));
@@ -80,7 +100,7 @@ pub fn app_log(level: &str, scope: &str, msg: &str) {
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
-/// 采系统版本串。ver 输出跟随系统代码页（中文系统=GBK），用 GBK 解码防乱码
+/// Collect the OS version string. ver output follows the system code page (GBK on some systems), so decode as GBK to avoid garbling
 fn sys_ver() -> String {
     use std::os::windows::process::CommandExt;
     Command::new("cmd").args(["/c", "ver"])
@@ -90,38 +110,38 @@ fn sys_ver() -> String {
             if had_err { String::from_utf8_lossy(&o.stdout).trim().to_string() }
             else { cow.trim().to_string() }
         })
-        .unwrap_or_else(|_| "(ver 不可用)".into())
+        .unwrap_or_else(|_| "(ver unavailable)".into())
 }
 
-/// 启动首行（run() 最先调用）：版本/系统/启动参数/进程信息
+/// First startup line (run() calls it first): version / system / launch args / process info
 fn log_startup(args: &str) {
     app_log("INFO", "startup", &format!(
-        "===== md-editor v{} 启动 | pid={} | args={}",
+        "===== Mdaddy v{} start | pid={} | args={}",
         env!("CARGO_PKG_VERSION"),
         std::process::id(),
-        if args.is_empty() { "(无)" } else { args }
+        if args.is_empty() { "(none)" } else { args }
     ));
-    // 系统/运行环境采集挪后台线程（v0.5.1 启动加速：cmd /c ver 实测 ~200ms，
-    // 原同步跑在窗口创建前白等；app_log 有 Mutex 线程安全，os= 行时间戳可能晚于后续行，可接受）
+    // System/runtime info collection moved to a background thread (v0.5.1 faster startup: cmd /c ver measured ~200ms,
+    // it used to run synchronously before window creation; app_log is Mutex thread-safe, the os= line may be timestamped after later lines, acceptable)
     std::thread::spawn(|| {
         let ver = sys_ver();
         let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "(路径不可用)".into());
+            .unwrap_or_else(|_| "(path unavailable)".into());
         app_log("INFO", "startup", &format!("os={} | exe={}", ver, exe));
     });
-    // panic 钩子：崩溃落日志（用户闪退/白屏的观测盲区）
+    // panic hook: write crashes to the log (the blind spot for user crashes / white screens)
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let loc = info.location()
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_else(|| "未知位置".into());
+            .unwrap_or_else(|| "unknown location".into());
         app_log("PANIC", "crash", &format!("{} | {}", loc, info));
         default_hook(info);
     }));
 }
 
-/// 导出诊断包：txt 单文件（系统信息+版本+启动参数+全部日志代）。
-/// 不用 zip：压缩需引库增大 exe，txt 同样单文件可直接转发，零依赖零风险。
+/// Export diagnostics: a single txt file (system info + version + launch args + every log generation).
+/// No zip: compression would need a library and grow the exe; a txt is also a single file to forward, zero dependencies, zero risk.
 #[tauri::command]
 fn export_diagnostics(path: String) -> Result<String, String> {
     let mut out = String::with_capacity(64 * 1024);
@@ -131,31 +151,31 @@ fn export_diagnostics(path: String) -> Result<String, String> {
         out.push_str(&format!("| {} \n", title));
         out.push_str(&hr);
     };
-    sec(&mut out, "md-editor 诊断包");
-    out.push_str(&format!("导出时间: {}\n版本: v{}\n进程 PID: {}\n",
+    sec(&mut out, "Mdaddy diagnostics");
+    out.push_str(&format!("Exported at: {}\nVersion: v{}\nProcess PID: {}\n",
         log_ts(), env!("CARGO_PKG_VERSION"), std::process::id()));
-    sec(&mut out, "系统信息");
+    sec(&mut out, "System info");
     out.push_str(&format!("OS: {}\n", sys_ver()));
     out.push_str(&format!("exe: {}\n", std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "?".into())));
-    out.push_str(&format!("盘符: {}\n", fixed_drive_roots().iter()
+    out.push_str(&format!("Drives: {}\n", fixed_drive_roots().iter()
         .map(|p| p.display().to_string()).collect::<Vec<_>>().join(" ")));
-    out.push_str(&format!("启动参数: {:?}\n", std::env::args().collect::<Vec<_>>()));
-    sec(&mut out, "运行日志（三代合并，新在前）");
-    for name in ["md-editor.log", "md-editor.log.1", "md-editor.log.2"] {
+    out.push_str(&format!("Launch args: {:?}\n", std::env::args().collect::<Vec<_>>()));
+    sec(&mut out, "Run log (3 generations merged, newest first)");
+    for name in ["mdaddy.log", "mdaddy.log.1", "mdaddy.log.2"] {
         if let Ok(t) = fs::read_to_string(logs_dir().join(name)) {
             out.push_str(&format!("----- {} -----\n{}\n", name, t));
         }
     }
     fs::write(&path, out.as_bytes()).map_err(|e| e.to_string())?;
-    app_log("INFO", "diag", &format!("诊断包已导出: {} ({}KB)", path, out.len() / 1024));
+    app_log("INFO", "diag", &format!("Diagnostics exported: {} ({}KB)", path, out.len() / 1024));
     Ok(path)
 }
 
-/// 允许打开/保存的扩展名（与前端 dialog/拖拽过滤口径一致）
+/// Extensions allowed to open/save (same rules as the frontend dialog/drag-drop filters)
 const ALLOWED_EXTS: &[&str] = &["md", "markdown", "mdown", "txt"];
 
-/// 路径扩展名是否在允许范围内（大小写不敏感）
+/// Whether the path's extension is allowed (case-insensitive)
 fn has_allowed_ext(path: &str) -> bool {
     match std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
         Some(ext) => ALLOWED_EXTS.iter().any(|a| a.eq_ignore_ascii_case(ext)),
@@ -163,43 +183,43 @@ fn has_allowed_ext(path: &str) -> bool {
     }
 }
 
-/// 从一组命令行参数中提取首个「扩展名合法且文件存在」的 markdown 路径。
-/// 双击 .md 时 Windows 把路径作为参数传入；单实例二次启动转发时复用同一逻辑。
+/// From a list of command-line args, take the first markdown path with "a valid extension and an existing file".
+/// Double-clicking a .md makes Windows pass the path as an argument; single-instance forwarding on a second launch reuses the same logic.
 fn extract_md_from_args(mut args: impl Iterator<Item = String>) -> Option<String> {
-    args.next(); // 跳过程序自身路径
+    args.next(); // skip the program's own path
     for a in args {
         if has_allowed_ext(&a) {
             if std::path::Path::new(&a).is_file() {
                 return Some(a);
             }
-            // 典型报障场景：双击旧快捷方式/参数里的文件已被移动或删除，静默落欢迎页
-            app_log("WARN", "startup", &format!("启动参数文件不存在，已忽略: {a}"));
+            // Typical report: double-clicking an old shortcut / the argument file was moved or deleted; silently fall back to the welcome page
+            app_log("WARN", "startup", &format!("Launch-arg file does not exist, ignored: {a}"));
         }
     }
     None
 }
 
-/// 取本进程启动参数中的文件路径（前端 invoke 兜底读取用）
+/// File path from this process's launch args (fallback read via frontend invoke)
 fn extract_md_arg() -> Option<String> {
     extract_md_from_args(std::env::args())
 }
 
-/// 读取文件，自动探测编码：UTF-8 BOM / UTF-8 / 回落 GBK。返回 (内容, 编码名)
+/// Read a file with automatic encoding detection: UTF-8 BOM / UTF-8 / fall back to GBK. Returns (content, encoding name)
 #[tauri::command]
 fn open_file(path: String) -> Result<(String, String), String> {
     if !has_allowed_ext(&path) {
-        app_log("WARN", "open", &format!("拒绝打开(扩展名不符): {path}"));
-        return Err("不支持的文件类型（仅 md/markdown/mdown/txt）".into());
+        app_log("WARN", "open", &format!("Refused to open (unsupported extension): {path}"));
+        return Err("Unsupported file type (md/markdown/mdown/txt only)".into());
     }
-    // 硬上限 16MB（v0.3.25 从 2MB 放宽）：读入+IPC 在此量级仍是亚秒级，拒绝线只防病态巨型文件；
-    // 真正的体验防线在前端（200 万字符拒开 + 大文档延迟取值通道，2026-09-07 实测重设）
+    // Hard limit 16MB (raised from 2MB in v0.3.25): reading + IPC is still sub-second at this size, the cut-off only guards against pathological giant files;
+    // the real experience guard is in the frontend (2,000,000-character refusal + large-document deferred channel, reset after 2026-09-07 measurements)
     if let Ok(meta) = fs::metadata(&path) {
         if meta.len() > 16 * 1024 * 1024 {
-            return Err(format!("文件过大（{} KB，上限 16384 KB），已阻止打开以免长时间无响应", meta.len() / 1024));
+            return Err(format!("File too large ({} KB, limit 16384 KB). Opening blocked to avoid freezing", meta.len() / 1024));
         }
     }
     let bytes = fs::read(&path).map_err(|e| {
-        app_log("ERROR", "open", &format!("读取失败 {path}: {e}"));
+        app_log("ERROR", "open", &format!("Read failed {path}: {e}"));
         e.to_string()
     })?;
     let (content, enc) = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
@@ -219,38 +239,38 @@ fn open_file(path: String) -> Result<(String, String), String> {
     Ok((content, enc))
 }
 
-/// 写文件，统一 UTF-8 无 BOM；临时文件 + rename 原子写，避免写入中断损坏原文件
+/// Write a file, always UTF-8 without BOM; temp file + rename for an atomic write, so an interrupted write cannot corrupt the original
 #[tauri::command]
 fn save_file(path: String, content: String) -> Result<FileMeta, String> {
     if !has_allowed_ext(&path) {
-        return Err("不支持的保存路径（仅 md/markdown/mdown/txt）".into());
+        return Err("Unsupported save path (md/markdown/mdown/txt only)".into());
     }
-    // 防护：拒绝用空内容覆盖非空文件（Vditor IR 模式 getValue 在 lute/异步未就绪时可能返回空串，
-    // 避免空写把原文件清零）。新文件（不存在）或原本就空的文件允许写空。
+    // Guard: refuse to overwrite a non-empty file with empty content (Vditor IR mode getValue may return an empty string while lute/async is not ready,
+    // so an empty write must not wipe the original). New (non-existent) files or files that were already empty may be written empty.
     if content.is_empty() {
         if let Ok(existing) = fs::read(&path) {
             if !existing.is_empty() {
-                return Err("拒绝写入空内容（原文件非空，疑似编辑器取值异常）".into());
+                return Err("Refused to write empty content (the existing file is not empty; possible editor glitch)".into());
             }
         }
     }
-    archive_old_version(&path); // v0.3.11 覆盖前归档旧版（best-effort）
+    archive_old_version(&path); // v0.3.11 archive the old version before overwriting (best-effort)
     let tmp = format!("{}.tmp", path);
-    // v0.5.2：句柄写入 + 在句柄上取元数据随结果返回。rename 刚落地时按路径读元数据可能短暂
-    // 命中旧目录项（实测旧版前端 refreshMeta 把旧 mtime/size 存成外改基准且不再刷新，下一轮
-    // 检测即误弹「文件已被外部修改」）。句柄元数据（GetFileInformationByHandle）描述的正是
-    // 本次写入的字节，权威无缓存；前端保存后直接以它为基准，不再单独回读。
+    // v0.5.2: write through the handle + read metadata on the handle and return it with the result. Reading metadata by path right after rename may briefly
+    // hit the old directory entry (measured: the old frontend refreshMeta stored the old mtime/size as the external-change baseline and never refreshed, so the next
+    // check wrongly popped "file was modified externally"). Handle metadata (GetFileInformationByHandle) describes exactly
+    // the bytes just written, authoritative and uncached; the frontend uses it as the baseline after saving, no separate re-read.
     {
         use std::io::Write;
         let write_err = |e: std::io::Error| {
-            app_log("ERROR", "save", &format!("写入失败 {path}: {e}"));
+            app_log("ERROR", "save", &format!("Write failed {path}: {e}"));
             e.to_string()
         };
         let mut f = fs::File::create(&tmp).map_err(write_err)?;
         f.write_all(content.as_bytes()).map_err(write_err)?;
         let meta = f.metadata().map_err(|e| e.to_string())?;
-        drop(f); // Windows 上 rename 前必须先关句柄
-        // 同目录 rename 在 Windows 上原子覆盖目标文件
+        drop(f); // on Windows the handle must be closed before rename
+        // a same-folder rename atomically replaces the target on Windows
         fs::rename(&tmp, &path).map_err(|e| {
             let _ = fs::remove_file(&tmp);
             e.to_string()
@@ -259,13 +279,13 @@ fn save_file(path: String, content: String) -> Result<FileMeta, String> {
     }
 }
 
-// ===== v0.3.11 版本历史/文件恢复 =====
-// 保存覆盖前把磁盘旧内容归档到 %APPDATA%\md-editor\versions\<文件stem>\，
-// 保留策略：每文件最近 50 版且 30 天内（保存时顺带清理）。best-effort：归档失败不阻断保存。
+// ===== v0.3.11 version history / file recovery =====
+// Before an overwrite, archive the old disk content to %APPDATA%\Mdaddy\versions\<file stem>\,
+// retention: the latest 50 versions per file within 30 days (cleaned up while saving). Best-effort: an archive failure never blocks saving.
 
 fn versions_root() -> std::path::PathBuf {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    std::path::PathBuf::from(base).join("md-editor").join("versions")
+    std::path::PathBuf::from(base).join("Mdaddy").join("versions")
 }
 
 fn version_stem(path: &str) -> String {
@@ -273,7 +293,7 @@ fn version_stem(path: &str) -> String {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("doc");
-    // 同名不同目录的文档共用一个 stem 分组：加路径短哈希消歧（FNV-1a 16 位足够）
+    // Documents with the same name in different folders share a stem group: add a short path hash to disambiguate (16-bit FNV-1a is enough)
     let mut h: u16 = 0;
     for b in path.bytes() {
         h = (h.wrapping_mul(31)).wrapping_add(b as u16);
@@ -281,7 +301,7 @@ fn version_stem(path: &str) -> String {
     format!("{}_{:04x}", stem.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect::<String>(), h)
 }
 
-/// 本地(UTC+8)时间戳串 yyyyMMdd_HHmmss（复用截图命名的无 chrono 换算）
+/// Local (UTC+8) timestamp string yyyyMMdd_HHmmss (reuses the chrono-free conversion from screenshot naming)
 fn local_ts() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -293,10 +313,10 @@ fn local_ts() -> String {
     format!("{:04}{:02}{:02}_{:02}{:02}{:02}", y, mo, d, s / 3600, s % 3600 / 60, s % 60)
 }
 
-/// 保存前归档旧内容（无旧文件/空文件跳过）。不返回 Result：失败静默（不影响保存主流程）。
+/// Archive the old content before saving (skip missing/empty files). Returns no Result: fails silently (does not affect the main save flow).
 fn archive_old_version(path: &str) {
-    // 测试隔离（仅 cargo test 编译期生效）：夹具全在 tempdir，跳过归档避免污染真实 %APPDATA%。
-    // 不能运行时判 temp 路径——本机 TEMP 重定向到 F:\Cache\temp，e2e 夹具同在其中会被误伤
+    // Test isolation (only at cargo test compile time): fixtures all live in a tempdir, skip archiving so the real %APPDATA% is not polluted.
+    // Cannot check the temp path at runtime — this machine's TEMP is redirected to F:\Cache\temp, and e2e fixtures live there too and would be hit
     #[cfg(test)]
     if std::path::Path::new(path).starts_with(std::env::temp_dir()) { return; }
     let Ok(old) = fs::read_to_string(path) else { return };
@@ -304,7 +324,7 @@ fn archive_old_version(path: &str) {
     let dir = versions_root().join(version_stem(path));
     if fs::create_dir_all(&dir).is_err() { return; }
     let _ = fs::write(dir.join(format!("{}.md", local_ts())), &old);
-    // 清理：>50 版删最旧；>30 天删
+    // Cleanup: >50 versions delete the oldest; >30 days delete
     let mut entries: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
     if let Ok(rd) = fs::read_dir(&dir) {
         for e in rd.flatten() {
@@ -333,7 +353,7 @@ struct VersionInfo {
     size: u64,
 }
 
-/// 列出某文档的全部版本（mtime 降序 = 最新在前）
+/// List all versions of a document (mtime descending = newest first)
 #[tauri::command]
 fn list_versions(path: String) -> Result<Vec<VersionInfo>, String> {
     let dir = versions_root().join(version_stem(&path));
@@ -360,7 +380,7 @@ fn list_versions(path: String) -> Result<Vec<VersionInfo>, String> {
     Ok(out)
 }
 
-/// 读一个版本快照。校验路径必须位于 versions 根内（防目录穿越读任意文件）。
+/// Read one version snapshot. The path must be inside the versions root (prevents directory traversal reading arbitrary files).
 #[tauri::command]
 fn read_version(file: String) -> Result<String, String> {
     let root = versions_root();
@@ -368,18 +388,18 @@ fn read_version(file: String) -> Result<String, String> {
     let canon = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let canon_root = root.canonicalize().unwrap_or(root);
     if !canon.starts_with(&canon_root) {
-        return Err("非法版本文件路径".into());
+        return Err("Invalid version file path".into());
     }
     fs::read_to_string(&canon).map_err(|e| e.to_string())
 }
 
-// ===== PDF 导出：调系统 msedge --headless --print-to-pdf =====
-// 矢量（文本可选可搜）、Chromium 原生分页（任意长度、无 canvas 上限）、无对话框、零额外依赖。
-// WebView2 runtime 是 Tauri 运行前提，任何能跑该 exe 的机器必有 msedge.exe。
-// 导出 HTML 由独立 msedge 进程从 file:/// 加载，不经过 Tauri webview，
-// 应用 CSP (script-src 'self') 不适用 → 内联样式/属性/file:// 资源不受限。
+// ===== PDF export: call the system msedge --headless --print-to-pdf =====
+// Vector (text selectable and searchable), native Chromium pagination (any length, no canvas limit), no dialogs, zero extra dependencies.
+// The WebView2 runtime is a Tauri prerequisite, so any machine that can run this exe has msedge.exe.
+// The export HTML is loaded from file:/// by a separate msedge process, not through the Tauri webview,
+// so the app CSP (script-src 'self') does not apply → inline styles/attributes/file:// resources are unrestricted.
 
-/// 唯一后缀：pid + 纳秒，保证并发/快速连点不撞名（与 tempdir() 测试辅助一致）
+/// Unique suffix: pid + nanoseconds, so concurrent/rapid clicks never collide (same as the tempdir() test helper)
 fn unique_suffix() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -388,7 +408,7 @@ fn unique_suffix() -> String {
     format!("{}_{}", std::process::id(), nanos)
 }
 
-/// 逐段数值比较版本号 a > b（长度不等时缺失段视为 0；不靠字符串比较，避免 "99" > "131"）
+/// Compare versions numerically segment by segment, a > b (missing segments count as 0; no string comparison, which would make "99" > "131")
 fn version_gt(a: &[u64], b: &[u64]) -> bool {
     let n = a.len().max(b.len());
     for i in 0..n {
@@ -401,8 +421,8 @@ fn version_gt(a: &[u64], b: &[u64]) -> bool {
     false
 }
 
-/// 在 base 目录下扫描语义版本号子目录（如 150.0.4078.105），返回版本最大者下的 msedge.exe。
-/// 非版本号目录（Installer / Application 等）忽略；子目录无 msedge.exe 忽略。
+/// Scan the base folder for semantic-version subfolders (e.g. 150.0.4078.105) and return msedge.exe under the highest one.
+/// Non-version folders (Installer / Application etc.) are ignored; subfolders without msedge.exe are ignored.
 fn pick_versioned_msedge(base: &PathBuf) -> Option<PathBuf> {
     let entries = fs::read_dir(base).ok()?;
     let mut best: Option<(Vec<u64>, PathBuf)> = None;
@@ -414,7 +434,7 @@ fn pick_versioned_msedge(base: &PathBuf) -> Option<PathBuf> {
             .filter_map(|p| p.parse::<u64>().ok())
             .collect();
         if parts.is_empty() {
-            continue; // 非纯数字点分（Installer 等）
+            continue; // not purely dotted digits (Installer etc.)
         }
         let exe = e.path().join("msedge.exe");
         if !exe.is_file() {
@@ -432,13 +452,13 @@ fn pick_versioned_msedge(base: &PathBuf) -> Option<PathBuf> {
     best.map(|(_, exe)| exe)
 }
 
-/// 定位系统 Edge / WebView2 runtime 的 msedge.exe（多级回退，返回首个存在）。
-/// 优先级：env → 系统 Edge(x86/x64) → WebView2 runtime。
-/// 系统 Edge 优先于 WebView2 runtime：实测 WebView2 runtime 的 msedge.exe 不支持
-/// --headless --print-to-pdf（退出码 13、无输出），而系统 Edge 正常生成矢量 PDF。
-/// Win10/11 几乎必带系统 Edge；WebView2 runtime 仅作系统 Edge 缺席时的兜底。
+/// Locate the system Edge / WebView2 runtime msedge.exe (multi-level fallback, returns the first that exists).
+/// Priority: env → system Edge (x86/x64) → WebView2 runtime.
+/// System Edge comes before the WebView2 runtime: measured, the WebView2 runtime's msedge.exe does not support
+/// --headless --print-to-pdf (exit code 13, no output), while system Edge produces vector PDFs fine.
+/// Win10/11 almost always ship system Edge; the WebView2 runtime is only a fallback when it is missing.
 fn locate_msedge() -> Result<PathBuf, String> {
-    // 1. env WEBVIEW2_BROWSER_EXECUTABLE_FOLDER（部署方显式指定）
+    // 1. env WEBVIEW2_BROWSER_EXECUTABLE_FOLDER (explicitly set by the deployer)
     if let Ok(dir) = std::env::var("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER") {
         let exe = PathBuf::from(&dir).join("msedge.exe");
         if exe.is_file() {
@@ -455,25 +475,25 @@ fn locate_msedge() -> Result<PathBuf, String> {
     if let Ok(la) = std::env::var("LOCALAPPDATA") {
         bases.push(PathBuf::from(&la));
     }
-    // 2. 系统 Edge：x86 → x64（headless print-to-pdf 实测可用，优先）
+    // 2. System Edge: x86 → x64 (headless print-to-pdf measured to work, preferred)
     for base in &bases {
         let exe = base.join("Microsoft").join("Edge").join("Application").join("msedge.exe");
         if exe.is_file() {
             return Ok(exe);
         }
     }
-    // 3. WebView2 runtime：per-machine 与 per-user 都扫，各取最大版本号子目录（兜底）
+    // 3. WebView2 runtime: scan per-machine and per-user, take the highest version subfolder of each (fallback)
     for base in &bases {
         let app_dir = base.join("Microsoft").join("EdgeWebView").join("Application");
         if let Some(exe) = pick_versioned_msedge(&app_dir) {
             return Ok(exe);
         }
     }
-    Err("未找到支持 PDF 导出的 Edge 浏览器（msedge.exe）。请确认已安装 Microsoft Edge 浏览器后重试（WebView2 runtime 不支持 PDF 导出）。".into())
+    Err("Microsoft Edge (msedge.exe) was not found; it is needed for PDF export. Please install Microsoft Edge and try again (the WebView2 runtime alone cannot export PDF).".into())
 }
 
-/// 本地路径转 file:// URL（Windows：反斜杠→正斜杠；非 ASCII/特殊字符 percent-encode，
-/// 避免 temp 目录含中文/空格时 msedge 无法加载）
+/// Local path to a file:// URL (Windows: backslash → slash; non-ASCII/special characters percent-encoded,
+/// so msedge can still load when the temp folder contains non-ASCII characters/spaces)
 fn file_url_from_path(p: &std::path::Path) -> String {
     let s = p.to_string_lossy().replace('\\', "/");
     let mut out = String::from("file:///");
@@ -493,9 +513,9 @@ fn file_url_from_path(p: &std::path::Path) -> String {
     out
 }
 
-/// 带超时执行子进程：spawn 后每 100ms 轮询 try_wait，超时则 kill。避免 msedge headless 卡死。
+/// Run a child process with a timeout: after spawn, poll try_wait every 100ms and kill on timeout. Prevents msedge headless hangs.
 fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<(), String> {
-    let mut child = cmd.spawn().map_err(|e| format!("启动 msedge 失败：{e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to start msedge: {e}"))?;
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -503,7 +523,7 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<(), String> {
                 return if status.success() {
                     Ok(())
                 } else {
-                    Err(format!("msedge 退出码非 0：{status}"))
+                    Err(format!("msedge exited with non-zero status: {status}"))
                 };
             }
             Ok(None) => {
@@ -511,19 +531,19 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<(), String> {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(format!(
-                        "msedge headless 导出超时（{}s），已终止",
+                        "msedge headless export timed out ({}s), terminated",
                         timeout.as_secs()
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Err(e) => return Err(format!("等待 msedge 退出失败：{e}")),
+            Err(e) => return Err(format!("Failed waiting for msedge to exit: {e}")),
         }
     }
 }
 
-/// 自测用固定 HTML：中文标题 + 长文撑 2 页 + 28px span + 代码块 + 表格。
-/// 供 --self-test-pdf 在无 GUI 下端到端验证 msedge 管线（部署机预检）。
+/// Fixed HTML for the self-test: heading + long text filling 2 pages + 28px span + code block + table.
+/// Lets --self-test-pdf verify the msedge pipeline end to end without a GUI (pre-flight on deployment machines).
 fn self_test_html() -> String {
     let head = r#"<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><style>
 @page { size: A4; margin: 15mm; }
@@ -535,25 +555,25 @@ pre,table,tr{break-inside:avoid;}
 table{border-collapse:collapse;} th,td{border:1px solid #888;padding:4px 8px;}
 code{background:#f4f4f4;padding:2px 4px;border-radius:3px;}
 </style></head><body>
-<h1>导出 PDF 自测中文标题</h1>
-<p>这是一段中文正文，用于验证 msedge headless 矢量打印管线是否正常工作。
-<span style="font-size:28px">这是被放大到 28px 的文字。</span></p>
-<h2>代码块测试</h2>
+<h1>PDF export self-test heading</h1>
+<p>This paragraph checks that the msedge headless vector print pipeline works.
+<span style="font-size:28px">This text is enlarged to 28px.</span></p>
+<h2>Code block test</h2>
 <pre><code>fn main() {
-    println!("Hello, 世界");
+    println!("Hello, world");
 }</code></pre>
-<h2>表格测试</h2>
-<table><thead><tr><th>项目</th><th>数值</th></tr></thead>
-<tbody><tr><td>行一</td><td>100</td></tr><tr><td>行二</td><td>200</td></tr></tbody></table>
-<h2>分页测试（撑满第二页）</h2>
+<h2>Table test</h2>
+<table><thead><tr><th>Item</th><th>Value</th></tr></thead>
+<tbody><tr><td>Row one</td><td>100</td></tr><tr><td>Row two</td><td>200</td></tr></tbody></table>
+<h2>Page break test (fills a second page)</h2>
 "#;
-    let body = "这是一行重复的长文本，用于把内容撑到第二页以验证 Chromium 分页是否正常。".repeat(120);
+    let body = "This is a repeated long line used to push content onto a second page to verify Chromium pagination. ".repeat(120);
     format!("{}{}</body></html>", head, body)
 }
 
-/// RAII 临时资源清理守卫：注册的临时文件/目录在 Drop 时 best-effort 删除，
-/// 覆盖 export_pdf 所有退出路径（含错误 return / panic），避免 temp 残留。
-/// 对同一路径先后尝试 remove_file 与 remove_dir_all：是文件则前者生效，是目录则后者生效，互不干扰。
+/// RAII temp-resource cleanup guard: registered temp files/folders are deleted best-effort on Drop,
+/// covering every exit path of export_pdf (including error returns / panics), so nothing is left in temp.
+/// Tries remove_file then remove_dir_all on each path: the former works for files, the latter for folders, without interfering.
 struct TmpClean(Vec<PathBuf>);
 impl Drop for TmpClean {
     fn drop(&mut self) {
@@ -564,10 +584,10 @@ impl Drop for TmpClean {
     }
 }
 
-/// 导出 PDF 核心：调系统 msedge --headless --print-to-pdf 把 HTML 渲染成矢量 PDF。
-/// 在三个可观测里程碑(page/printing/saving)调用 emit 回调推送真百分比：
-/// 命令版 export_pdf 注入 AppHandle 发 Tauri 事件，self-test 版注入空回调（无 GUI，事件丢弃）。
-/// 单次 msedge 打印尝试：构建命令、执行、白纸校验。profile 策略由调用方决定（固定复用/唯一兜底）。
+/// PDF export core: call the system msedge --headless --print-to-pdf to render HTML into a vector PDF.
+/// At three observable milestones (page/printing/saving) the emit callback pushes real percentages:
+/// the command version of export_pdf injects AppHandle to send Tauri events, the self-test version injects an empty callback (no GUI, events dropped).
+/// A single msedge print attempt: build the command, run it, check for a blank result. The profile strategy is the caller's (fixed reuse / unique fallback).
 fn pdf_attempt<F: Fn(&str, u8)>(
     msedge: &std::path::Path,
     profile_dir: &std::path::Path,
@@ -575,9 +595,9 @@ fn pdf_attempt<F: Fn(&str, u8)>(
     tmp_pdf: &std::path::Path,
     emit: &F,
 ) -> Result<(), String> {
-    // user-data-dir 必须用 = 连接：Edge 150 headless=new 会把空格分隔的 flag 值误判为
-    // target URL，叠加 html_url 触发 "Multiple targets are not supported in headless mode"
-    // （exit 13，本机实测复现）。等号连接后值内嵌进 flag，不再被当作独立 target。
+    // user-data-dir must be joined with =: Edge 150 headless=new mistakes a space-separated flag value for a
+    // target URL, which together with html_url triggers "Multiple targets are not supported in headless mode"
+    // (exit 13, reproduced locally). Joined with =, the value is embedded in the flag and no longer treated as a separate target.
     let profile_str = profile_dir.to_string_lossy().replace('\\', "/");
     let tmp_pdf_str = tmp_pdf.to_string_lossy().replace('\\', "/");
     let mut cmd = Command::new(msedge);
@@ -587,7 +607,7 @@ fn pdf_attempt<F: Fn(&str, u8)>(
         "--no-pdf-header-footer",
         "--virtual-time-budget=5000",
         "--run-all-compositor-stages-before-draw",
-        // 静音参数：跳过首运行向导/默认浏览器提示/扩展/组件更新/后台网络（对纯本地打印无意义）
+        // Quiet flags: skip first-run wizard / default-browser prompt / extensions / component updates / background networking (pointless for local printing)
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-extensions",
@@ -598,60 +618,60 @@ fn pdf_attempt<F: Fn(&str, u8)>(
     cmd.arg(format!("--user-data-dir={}", profile_str));
     cmd.arg(format!("--print-to-pdf={}", tmp_pdf_str));
     cmd.arg(html_url);
-    // Windows：CREATE_NO_WINDOW，避免闪命令行黑窗
+    // Windows: CREATE_NO_WINDOW, so no console window flashes
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    // 打印引擎（msedge headless）是黑盒子：父进程无法读取其逐页/字节进度，
-    // 只能在启动前发 "printing"；前端据此启动估算曲线平滑逼近 90%，真完成才跳 100%。
+    // The print engine (msedge headless) is a black box: the parent cannot read per-page/byte progress,
+    // so "printing" is only sent before launch; the frontend then runs an estimate curve towards 90% and jumps to 100% on real completion.
     emit("printing", 50);
-    // v0.3.8：30s→120s。实测 Edge 150 起 headless print-to-pdf 在本机从 ~3s 恶化到 45-60s
-    // （1KB 极简页同慢=引擎级回归，与导出内容无关），30s 必超时→重试连环更久。外部引擎耗时
-    // 不可控，上限放宽到 120s 兜底慢环境；正常环境 2-3s 完成不受影响。
+    // v0.3.8: 30s → 120s. Measured: since Edge 150, headless print-to-pdf went from ~3s to 45-60s on this machine
+    // (a minimal 1KB page is just as slow = engine-level regression, unrelated to content), 30s always timed out → retries took even longer. External engine time
+    // is out of our control, so the limit is raised to 120s for slow setups; normal setups finishing in 2-3s are unaffected.
     run_with_timeout(cmd, Duration::from_secs(120))?;
-    // 白纸校验：文件存在 + %PDF 魔数 + size > 2000（空白壳通常 < 2KB）。
-    // 同 profile 被 Chromium 单实例转发的场景 msedge 仍退出码 0 但不产文件——必须在此拦下。
+    // Blank check: file exists + %PDF magic + size > 2000 (a blank shell is usually < 2KB).
+    // When the same profile is forwarded by Chromium's single-instance logic, msedge still exits 0 but produces no file — must be caught here.
     if !tmp_pdf.is_file() {
-        return Err("msedge 未生成 PDF 文件（导出失败）".into());
+        return Err("msedge did not produce a PDF file (export failed)".into());
     }
-    let bytes = fs::read(tmp_pdf).map_err(|e| format!("读取生成的 PDF 失败：{e}"))?;
+    let bytes = fs::read(tmp_pdf).map_err(|e| format!("Failed to read the generated PDF: {e}"))?;
     if bytes.len() < 2000 {
-        return Err(format!("生成的 PDF 异常过小（{} 字节，疑似空白）", bytes.len()));
+        return Err(format!("Generated PDF is suspiciously small ({} bytes, probably blank)", bytes.len()));
     }
     if !bytes.starts_with(b"%PDF") {
-        return Err("生成的文件不是有效 PDF（缺少 %PDF 魔数）".into());
+        return Err("Generated file is not a valid PDF (missing %PDF header)".into());
     }
     Ok(())
 }
 
 fn render_pdf<F: Fn(&str, u8)>(html: String, path: String, emit: F) -> Result<(), String> {
-    // 1. 校验扩展名与内容
+    // 1. Validate extension and content
     match std::path::Path::new(&path).extension().and_then(|e| e.to_str()) {
         Some(ext) if ext.eq_ignore_ascii_case("pdf") => {}
-        _ => return Err("不支持的保存路径（仅 .pdf）".into()),
+        _ => return Err("Unsupported save path (.pdf only)".into()),
     }
     if html.trim().is_empty() {
-        return Err("导出内容为空".into());
+        return Err("Nothing to export".into());
     }
 
     let msedge = locate_msedge()?;
 
-    // 2. 临时资源：HTML 每次唯一并随 TmpClean 清理；profile 改用固定目录跨次复用——
-    //    实测（300 段基准文档）每次新建 profile 冷启动 ~8s，复用固定 profile 热启动 ~2s，
-    //    提速主收益在此。固定 profile 不删除（留给下次复用）；并发/损坏由下方唯一 profile 重试兜底。
+    // 2. Temp resources: the HTML is unique each time and cleaned by TmpClean; the profile uses a fixed folder reused across runs —
+    //    measured (300-paragraph benchmark document) a new profile each time cold-starts in ~8s, reusing a fixed profile warm-starts in ~2s,
+    //    which is the main speed gain. The fixed profile is not deleted (kept for reuse); concurrency/corruption is handled by the unique-profile retry below.
     let tmp_dir = std::env::temp_dir();
     let html_path = tmp_dir.join(format!("md_export_{}.html", unique_suffix()));
     let mut clean = TmpClean(Vec::new());
     clean.0.push(html_path.clone());
     fs::write(&html_path, html.as_bytes())
-        .map_err(|e| format!("写临时 HTML 失败：{e}"))?;
-    // HTML 已组装落盘，即将启动打印引擎 —— 第一个可观测里程碑
+        .map_err(|e| format!("Failed to write temp HTML: {e}"))?;
+    // HTML assembled and written to disk, about to launch the print engine — first observable milestone
     emit("page", 30);
 
-    // 3. 临时 PDF：写到最终路径同目录（同目录 rename 才原子；跨卷会退化为复制）
+    // 3. Temp PDF: written next to the final path (only a same-folder rename is atomic; across volumes it degrades to a copy)
     let final_dir = std::path::Path::new(&path)
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -659,35 +679,35 @@ fn render_pdf<F: Fn(&str, u8)>(html: String, path: String, emit: F) -> Result<()
     let tmp_pdf = final_dir.join(format!(".md_export_{}.pdf.tmp", unique_suffix()));
     clean.0.push(tmp_pdf.clone());
 
-    // 4. msedge headless 打印：先固定 profile（热启动 ~2s）；失败（profile 损坏/被运行中
-    //    实例转发致 0KB 等，前端重入锁已防同应用连点，跨实例并发仍可能撞）→ 清固定目录，
-    //    换全新唯一 profile 重试一次（退回冷启动 ~8s，保成功）。
+    // 4. msedge headless print: try the fixed profile first (warm start ~2s); on failure (corrupt profile / forwarded to a running
+    //    instance giving 0KB etc.; the frontend reentry lock stops repeated clicks in one app, but cross-instance concurrency can still collide) → clear the fixed folder,
+    //    retry once with a brand-new unique profile (back to a ~8s cold start, but succeeds).
     let html_url = file_url_from_path(&html_path);
-    let fixed_profile = tmp_dir.join("md-editor-pdf-profile");
+    let fixed_profile = tmp_dir.join("mdaddy-pdf-profile");
     if let Err(first_err) = pdf_attempt(&msedge, &fixed_profile, &html_url, &tmp_pdf, &emit) {
         let _ = fs::remove_dir_all(&fixed_profile);
-        let retry_profile = tmp_dir.join(format!("md-editor-pdf-profile-{}", unique_suffix()));
+        let retry_profile = tmp_dir.join(format!("mdaddy-pdf-profile-{}", unique_suffix()));
         clean.0.push(retry_profile.clone());
         pdf_attempt(&msedge, &retry_profile, &html_url, &tmp_pdf, &emit)
-            .map_err(|e2| format!("{first_err}（已用全新配置重试仍失败：{e2}）"))?;
+            .map_err(|e2| format!("{first_err} (retry with a fresh profile also failed: {e2})"))?;
     }
 
-    // 白纸校验已过，PDF 内容就绪，正在原子落盘到目标路径 —— 最后一个可观测里程碑
+    // Blank check passed, PDF content ready, atomically writing it to the target path — last observable milestone
     emit("saving", 95);
-    // 7. 原子覆盖最终路径；rename 失败（目标被 PDF 阅读器占用）回落 copy+删。
-    //    成功 return 后 guard 统一清理 html_path / 重试 profile / 残留 tmp_pdf
-    //    （固定 profile 有意保留复用，见上）。
+    // 7. Atomically replace the final path; if rename fails (target locked by a PDF reader) fall back to copy + delete.
+    //    After a successful return the guard cleans up html_path / retry profile / leftover tmp_pdf
+    //    (the fixed profile is deliberately kept for reuse, see above).
     if let Err(e) = fs::rename(&tmp_pdf, &path) {
         if let Err(e2) = fs::copy(&tmp_pdf, &path) {
             return Err(format!(
-                "写入目标 PDF 失败：{e}（重试复制也失败：{e2}，目标文件可能正被 PDF 阅读器占用）"
+                "Failed to write the PDF: {e} (retry also failed: {e2}; the file may be open in a PDF reader)"
             ));
         }
     }
     Ok(())
 }
 
-/// Tauri 命令版：前端 invoke 入口。注入 AppHandle，在里程碑点向前端 emit ("stage", pct) 真百分比。
+/// Tauri command version: the frontend invoke entry point. Injects AppHandle and emits ("stage", pct) real percentages to the frontend at milestones.
 #[tauri::command]
 fn export_pdf(app: AppHandle, html: String, path: String) -> Result<(), String> {
     render_pdf(html, path, |stage, pct| {
@@ -695,19 +715,65 @@ fn export_pdf(app: AppHandle, html: String, path: String) -> Result<(), String> 
     })
 }
 
-/// 取启动时命令行传入的文件路径（前端启动后 invoke 兜底读取）
+/// Get the file path passed on the command line at startup (fallback read by the frontend after startup)
 #[tauri::command]
 fn get_startup_file(state: tauri::State<StartupFile>) -> Option<String> {
     state.0.lock().ok()?.clone()
 }
 
-// ===== PDF 处理统一入口：打开 PDF 时智能分流（有源回源 / 无源调 PDF4QT）=====
+#[tauri::command]
+fn take_instance_requests(state: tauri::State<InstanceRequests>) -> Vec<InstancePromptRequest> {
+    let Ok(mut requests) = state.0.lock() else { return Vec::new(); };
+    let mut ready = Vec::new();
+    for request in requests.iter_mut() {
+        if !request.shown {
+            request.shown = true;
+            ready.push(InstancePromptRequest { id: request.id });
+        }
+    }
+    ready
+}
 
-/// 探测 PDF4QT 主编辑器可执行文件路径。PDF4QT 是组件式，无 PDF4QT.exe，PDF 编辑器组件是
-/// Pdf4QtEditor.exe（同目录另有 Viewer/PageMaster/Diff/LaunchPad 等组件）。
-/// 探测顺序：env PDF4QT_PATH → F:\software\PDF4QT（本机便携安装位）→ F:\PDF4QT →
-/// ProgramFiles / ProgramFiles(x86) / LOCALAPPDATA 下 PDF4QT 子目录。
-/// 探测不到返回 None → 前端回落 plugin-opener 用系统默认 PDF 程序打开。
+#[tauri::command]
+fn resolve_instance_request(
+    app: AppHandle,
+    state: tauri::State<InstanceRequests>,
+    request_id: u64,
+    action: String,
+) -> Result<(), String> {
+    let request = {
+        let mut requests = state.0.lock().map_err(|e| e.to_string())?;
+        let idx = requests.iter().position(|r| r.id == request_id).ok_or("Instance request expired")?;
+        requests.remove(idx)
+    };
+    if action == "new" {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let mut command = Command::new(exe);
+        command.arg("--mdaddy-new-instance");
+        command.args(request.args.iter().skip(1));
+        command.current_dir(request.cwd);
+        command.spawn().map_err(|e| format!("Could not start a new Mdaddy instance: {e}"))?;
+        return Ok(());
+    }
+    if action != "open" { return Err("Unknown instance action".into()); }
+    if let Some(file) = extract_md_from_args(request.args.into_iter()) {
+        app.emit("open-file", file).map_err(|e| e.to_string())?;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    Ok(())
+}
+
+// ===== Unified PDF entry: smart routing when opening a PDF (source exists → open source / no source → PDF4QT) =====
+
+/// Detect the PDF4QT main editor executable. PDF4QT is component-based with no PDF4QT.exe; the PDF editor component is
+/// Pdf4QtEditor.exe (the same folder also holds Viewer/PageMaster/Diff/LaunchPad etc.).
+/// Detection order: env PDF4QT_PATH → F:\software\PDF4QT (local portable install) → F:\PDF4QT →
+/// PDF4QT subfolders under ProgramFiles / ProgramFiles(x86) / LOCALAPPDATA.
+/// Returns None if not found → the frontend falls back to plugin-opener with the system default PDF app.
 fn locate_pdf4qt() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("PDF4QT_PATH") {
         let exe = PathBuf::from(&dir).join("Pdf4QtEditor.exe");
@@ -736,9 +802,9 @@ fn locate_pdf4qt() -> Option<PathBuf> {
     None
 }
 
-/// 查找 PDF 的同名源文件（.md/.markdown/.html/.htm）：取 PDF 所在目录 + 去扩展名 basename，
-/// 依次探测同名各扩展名，返回首个存在的源路径。无源返回 None。
-/// 供前端"打开 PDF → 有源则打开源编辑、改完重导出覆盖 PDF"的闭环使用。
+/// Find the PDF's same-name source file (.md/.markdown/.html/.htm): PDF folder + basename without extension,
+/// try each extension in turn and return the first source path that exists. None if there is no source.
+/// Used for the frontend loop "open PDF → if a source exists, edit the source and re-export over the PDF".
 #[tauri::command]
 fn find_pdf_source(pdf_path: String) -> Option<String> {
     let p = std::path::Path::new(&pdf_path);
@@ -756,72 +822,72 @@ fn find_pdf_source(pdf_path: String) -> Option<String> {
     None
 }
 
-/// 用外部 PDF4QT 打开无源 PDF 进行编辑。探测不到 PDF4QT 时返回 "PDF4QT_NOT_FOUND"，
-/// 前端据此回落 plugin-opener（系统默认 PDF 程序）。GUI 程序 spawn 后立即返回，不 wait、不加 CREATE_NO_WINDOW。
+/// Open a source-less PDF in external PDF4QT for editing. Returns "PDF4QT_NOT_FOUND" if PDF4QT is not detected,
+/// so the frontend falls back to plugin-opener (system default PDF app). The GUI program returns right after spawn: no wait, no CREATE_NO_WINDOW.
 #[tauri::command]
 fn open_pdf_external(path: String) -> Result<(), String> {
     let p = std::path::Path::new(&path);
     match p.extension().and_then(|e| e.to_str()) {
         Some(ext) if ext.eq_ignore_ascii_case("pdf") => {}
-        _ => return Err("仅支持打开 .pdf 文件".into()),
+        _ => return Err("Only .pdf files can be opened".into()),
     }
     if !p.is_file() {
-        return Err(format!("文件不存在：{}", path));
+        return Err(format!("File does not exist: {}", path));
     }
     match locate_pdf4qt() {
         Some(exe) => {
             Command::new(&exe)
                 .arg(&path)
                 .spawn()
-                .map_err(|e| format!("启动 PDF4QT 失败：{e}"))?;
+                .map_err(|e| format!("Failed to start PDF4QT: {e}"))?;
             Ok(())
         }
         None => Err("PDF4QT_NOT_FOUND".into()),
     }
 }
 
-/// HTML5 拖放打开 PDF：前端读不到原始路径（WebView2 安全限制），把字节写临时文件再交 PDF4QT。
-/// 复用 open_pdf_external 的探测/启动逻辑。仅 .pdf，限 5MB（更大文件应走「打开」按钮拿原路径）。
+/// HTML5 drag-drop of a PDF: the frontend cannot get the original path (WebView2 security), so the bytes go to a temp file handed to PDF4QT.
+/// Reuses open_pdf_external's detection/launch logic. .pdf only, up to 5MB (larger files should use the Open button to get the real path).
 #[tauri::command]
 fn open_dropped_pdf(content: Vec<u8>, name: String) -> Result<(), String> {
     if !name.to_lowercase().ends_with(".pdf") {
-        return Err("仅支持 .pdf".into());
+        return Err("Only .pdf is supported".into());
     }
     if content.len() > 5 * 1024 * 1024 {
-        return Err("PDF 超过 5MB，请改用「打开」按钮选择文件".into());
+        return Err("PDF > 5MB, please use the Open button".into());
     }
-    // 名字不可信：只取 file_name，防路径穿越
+    // the name is untrusted: only take file_name, prevents path traversal
     let safe_name = std::path::Path::new(&name)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("dropped.pdf");
-    let dir = std::env::temp_dir().join("md-editor-drag");
-    fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
+    let dir = std::env::temp_dir().join("mdaddy-drag");
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create temp folder: {e}"))?;
     let tmp = dir.join(safe_name);
-    fs::write(&tmp, &content).map_err(|e| format!("写入临时文件失败：{e}"))?;
+    fs::write(&tmp, &content).map_err(|e| format!("Failed to write temp file: {e}"))?;
     if safe_name == "__dnd_selftest__.pdf" {
-        return Ok(()); // 自测哨兵：只验证临时文件已写入，不拉起 PDF4QT
+        return Ok(()); // self-test sentinel: only verify the temp file was written, do not launch PDF4QT
     }
     open_pdf_external(tmp.to_string_lossy().into_owned())
 }
 
-/// 自测开关：启动参数含 --dnd-selftest 时为 true（供前端合成 drop 事件验证 HTML5 拖放全链路；常驻无害）
+/// Self-test switch: true when launch args contain --dnd-selftest (lets the frontend synthesize drop events to verify the whole HTML5 drag-drop chain; harmless to keep)
 #[tauri::command]
 fn dnd_selftest_enabled() -> bool {
     std::env::args().any(|a| a == "--dnd-selftest")
 }
 
-/// v0.3.9 打印：WebView2 的 window.print() 被 WebView2 静默忽略（宿主负责打印，实测无窗口），
-/// 走微软正路 ICoreWebView2_16::ShowPrintUI —— 系统"打印预览"窗口（可选打印机/份数/双面）。
-/// 打印内容（正文渲染 HTML）由前端先备好 #print-root + @media print 隐藏应用 UI。
-/// ShowPrintUI 打开预览后立即返回（非模态）；预览窗口关闭时前端收 afterprint 清理。
+/// v0.3.9 print: WebView2 silently ignores window.print() (the host is responsible for printing; measured, no window appears),
+/// so use Microsoft's proper path ICoreWebView2_16::ShowPrintUI — the system "print preview" window (printer/copies/duplex).
+/// The print content (rendered body HTML) is prepared by the frontend in #print-root + @media print hides the app UI.
+/// ShowPrintUI returns right after opening the preview (non-modal); when the preview closes the frontend cleans up on afterprint.
 #[tauri::command]
 fn print_webview(window: tauri::WebviewWindow) -> Result<(), String> {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         ICoreWebView2_16, COREWEBVIEW2_PRINT_DIALOG_KIND_SYSTEM,
     };
-    use windows::core::Interface; // cast() 是 Interface trait 方法
-    // with_webview 闭包在主线程执行，invoke 在 runtime 线程等结果——channel 传回，无死锁
+    use windows::core::Interface; // cast() is an Interface trait method
+    // the with_webview closure runs on the main thread, invoke waits on a runtime thread — result goes back through a channel, no deadlock
     let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
     window
         .with_webview(move |webview| {
@@ -830,23 +896,23 @@ fn print_webview(window: tauri::WebviewWindow) -> Result<(), String> {
                     let t0 = std::time::Instant::now();
                     let core = webview.controller().CoreWebView2()?;
                     let p16: ICoreWebView2_16 = core.cast()?;
-                    // SYSTEM(1)=传统系统打印对话框（选打印机/份数/双面），实测本机可弹；
-                    // BROWSER(0)=Edge 式预览窗在 Tauri 宿主下静默无效（S_OK 无窗），不用
+                    // SYSTEM(1) = classic system print dialog (printer/copies/duplex), measured to open here;
+                    // BROWSER(0) = Edge-style preview silently does nothing under the Tauri host (S_OK, no window), not used
                     let hr = p16.ShowPrintUI(COREWEBVIEW2_PRINT_DIALOG_KIND_SYSTEM);
-                    eprintln!("[print] ShowPrintUI(SYSTEM) 返回 {hr:?}，阻塞 {:?}", t0.elapsed());
+                    eprintln!("[print] ShowPrintUI(SYSTEM) returned {hr:?}, blocked {:?}", t0.elapsed());
                     hr
                 })()
             };
             let _ = tx.send(res.map_err(|e| e.to_string()));
         })
-        .map_err(|e| format!("with_webview 失败：{e}"))?;
+        .map_err(|e| format!("with_webview failed: {e}"))?;
     rx.recv()
-        .map_err(|_| "打印结果通道关闭".to_string())?
-        .map_err(|e| format!("ShowPrintUI 失败：{e}"))
+        .map_err(|_| "Print result channel closed".to_string())?
+        .map_err(|e| format!("ShowPrintUI failed: {e}"))
 }
 
-/// 自测导出目录：启动参数 --export-selftest <dir> 时返回该目录（前端导出跳过原生保存对话框、
-/// 直接拼 dir/文档名.ext 落盘，供 e2e 全链路自动化；正常启动返回 None 走对话框）
+/// Self-test export folder: with launch arg --export-selftest <dir>, returns that folder (frontend exports skip the native save dialog
+/// and write dir/document-name.ext directly for full-chain e2e automation; a normal launch returns None and uses the dialog)
 #[tauri::command]
 fn export_selftest_dir() -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
@@ -854,7 +920,7 @@ fn export_selftest_dir() -> Option<String> {
     r
 }
 
-// ===== v0.3.26 外部修改检测：读文件元信息（mtime+size），前端比对是否被其他程序改动 =====
+// ===== v0.3.26 external change detection: read file metadata (mtime + size), the frontend compares to see if another program changed it =====
 #[derive(serde::Serialize, Debug)]
 struct FileMeta {
     #[serde(rename = "mtimeMs")]
@@ -868,7 +934,7 @@ fn file_meta(path: String) -> Result<FileMeta, String> {
     Ok(meta_to_file_meta(&meta))
 }
 
-/// Metadata → FileMeta 统一换算（file_meta 路径读与 save_file 句柄读共用）
+/// Metadata → FileMeta conversion (shared by the file_meta path read and the save_file handle read)
 fn meta_to_file_meta(meta: &fs::Metadata) -> FileMeta {
     let mtime_ms = meta
         .modified()
@@ -879,10 +945,10 @@ fn meta_to_file_meta(meta: &fs::Metadata) -> FileMeta {
     FileMeta { mtime_ms, size: meta.len() }
 }
 
-// ===== UI 状态持久化（显示比例等）：写 %APPDATA%/<identifier>/ui-state.json =====
-// 不用 localStorage：WebView2 的 localStorage 磁盘刷盘异步，进程被强杀/崩溃即丢
-// （e2e 里 taskkill //F 复现），文件写入是同步可靠的。
-// v0.5.0 便携模式：改写 exe 旁 Data/ui-state.json（data_root 统一分流）。
+// ===== UI state persistence (zoom etc.): written to %APPDATA%/<identifier>/ui-state.json =====
+// Not localStorage: WebView2 flushes localStorage to disk asynchronously, so a killed/crashed process loses it
+// (reproduced in e2e with taskkill //F); a file write is synchronous and reliable.
+// v0.5.0 portable mode: written to Data/ui-state.json next to the exe instead (data_root routes it).
 fn data_root(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(d) = portable_dir() {
         return Ok(d.clone());
@@ -906,9 +972,9 @@ fn save_ui_state(app: AppHandle, v: serde_json::Value) -> Result<(), String> {
     fs::write(&p, serde_json::to_string(&v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
 }
 
-// ===== v0.5.0 UI 偏好便携化：便携模式走 Data/settings.json，安装版维持 localStorage =====
-// 便携模式下 WebView2 数据目录被指去 %TEMP%（localStorage 不随机器持久），语言/字号/
-// 面板宽度等低频偏好必须落 Data 才能跟U盘走。安装版前端不调这两个命令。
+// ===== v0.5.0 portable UI preferences: portable mode uses Data/settings.json, the installed version keeps localStorage =====
+// In portable mode the WebView2 data folder points to %TEMP% (localStorage does not persist per machine), so low-frequency preferences
+// like font size / panel width must be written to Data to travel with the USB drive. The installed frontend never calls these two commands.
 fn prefs_path(app: &AppHandle) -> Result<PathBuf, String> {
     let d = data_root(app)?;
     if portable_dir().is_none() {
@@ -930,14 +996,14 @@ fn load_prefs(app: AppHandle) -> Option<serde_json::Value> {
 
 #[tauri::command]
 fn save_prefs(app: AppHandle, v: serde_json::Value) -> Result<(), String> {
-    let p = prefs_path(&app)?; // 安装版误调 → Err("not portable")，不写安装版目录
+    let p = prefs_path(&app)?; // called by mistake in the installed version → Err("not portable"), nothing written to the install folder
     fs::create_dir_all(p.parent().ok_or("no parent")?).map_err(|e| e.to_string())?;
     fs::write(&p, serde_json::to_string(&v).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
 }
 
-// ===== v0.4.0 自定义主题：themes/ 目录扫描 + 读取（Typora 社区主题兼容） =====
-// 目录：%APPDATA%/<identifier>/themes/。一个 .css 文件 = 一个主题（文件名即主题名，
-// 同 Typora 的 themes 目录约定）。读取校验 canonicalize 在主题目录内防穿越。
+// ===== v0.4.0 custom themes: scan + read the themes/ folder (compatible with Typora community themes) =====
+// Folder: %APPDATA%/<identifier>/themes/. One .css file = one theme (file name = theme name,
+// same as Typora's themes folder convention). Reads are validated with canonicalize inside the theme folder against traversal.
 fn themes_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(data_root(app)?.join("themes"))
 }
@@ -955,7 +1021,7 @@ fn list_theme_files(app: AppHandle) -> Vec<String> {
             if p.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("css")).unwrap_or(false) {
                 if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
                     if !stem.starts_with('_') {
-                        out.push(stem.to_string()); // _ 前缀=禁用（示例/草稿，同 Typora 惯例）
+                        out.push(stem.to_string()); // _ prefix = disabled (samples/drafts, Typora convention)
                     }
                 }
             }
@@ -985,9 +1051,9 @@ fn read_theme_css(app: AppHandle, name: String) -> Result<String, String> {
     fs::read_to_string(&canon).map_err(|e| e.to_string())
 }
 
-// ===== v0.3.14 文件树侧栏 + 全局跨文件搜索；v0.3.16 盘符根 =====
+// ===== v0.3.14 file tree sidebar + global cross-file search; v0.3.16 drive roots =====
 
-/// 列本机所有盘符（文件树"此电脑"根用）：C..Z 逐个探测，零依赖不用 Win32 API。
+/// List all drives on this machine (for the file tree "This PC" root): probe C..Z one by one, zero dependencies, no Win32 API.
 #[tauri::command]
 fn list_drives() -> Vec<serde_json::Value> {
     let mut out = vec![];
@@ -1001,15 +1067,64 @@ fn list_drives() -> Vec<serde_json::Value> {
 }
 
 
-/// 目录树忽略的子目录名（隐藏目录「.」开头另行判断）
+/// Subfolder names the tree ignores (hidden folders starting with "." are checked separately)
 const TREE_SKIP_DIRS: &[&str] = &["node_modules", "target", "dist", "__pycache__"];
 
 fn tree_skip(name: &str) -> bool {
     name.starts_with('.') || TREE_SKIP_DIRS.iter().any(|s| *s == name)
 }
 
-/// 列目录一层（文件树懒展开用）：目录（跳过隐藏/node_modules 等）+ 文本类文件。
-/// 排序：目录在前、名字母序（不区分大小写）。返回 [{name, path, is_dir}]
+fn path_is_hidden(path: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return fs::metadata(path).map(|metadata| metadata.file_attributes() & 0x2 != 0).unwrap_or(false);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Resolve an Explorer custom folder icon from desktop.ini when it points to a renderable image file.
+/// PE resource icons (DLL/EXE) are left to the frontend's bundled SVG fallback.
+#[tauri::command]
+fn folder_custom_icon(path: String) -> Option<String> {
+    let dir = PathBuf::from(path);
+    let ini = fs::read_to_string(dir.join("desktop.ini")).ok()?;
+    let mut icon = None;
+    for line in ini.lines() {
+        let Some((key, value)) = line.split_once('=') else { continue };
+        if !key.trim().eq_ignore_ascii_case("IconResource") && !key.trim().eq_ignore_ascii_case("IconFile") {
+            continue;
+        }
+        let value = value.trim().trim_matches('"');
+        let value = value.split(',').next().unwrap_or(value).trim().trim_matches('"');
+        let mut expanded = String::new();
+        let mut rest = value;
+        while let Some(start) = rest.find('%') {
+            expanded.push_str(&rest[..start]);
+            let tail = &rest[start + 1..];
+            let Some(end) = tail.find('%') else { expanded.push_str(&rest[start..]); rest = ""; break };
+            let name = &tail[..end];
+            expanded.push_str(&std::env::var(name).unwrap_or_else(|_| format!("%{name}%")));
+            rest = &tail[end + 1..];
+        }
+        expanded.push_str(rest);
+        let candidate = PathBuf::from(expanded);
+        let candidate = if candidate.is_absolute() { candidate } else { dir.join(candidate) };
+        let ext = candidate.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
+        if ["ico", "png", "jpg", "jpeg", "bmp", "svg"].contains(&ext.as_str()) && candidate.is_file() {
+            icon = Some(candidate.to_string_lossy().to_string());
+            break;
+        }
+    }
+    icon
+}
+
+/// List one folder level (for lazy tree expansion): folders (skipping hidden/node_modules etc.) + text files.
+/// Sort: folders first, then names alphabetically (case-insensitive). Returns [{name, path, is_dir}]
 #[tauri::command]
 fn list_md_dir(path: String) -> Result<Vec<serde_json::Value>, String> {
     let mut dirs: Vec<(String, String)> = vec![];
@@ -1021,17 +1136,20 @@ fn list_md_dir(path: String) -> Result<Vec<serde_json::Value>, String> {
         if tree_skip(&name) {
             continue;
         }
+        if path_is_hidden(&entry.path()) {
+            continue;
+        }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let full = entry.path().to_string_lossy().to_string();
         if is_dir {
             dirs.push((name, full));
         } else {
-            // v0.3.21：树列全部文件（不再只列可编辑扩展名）——不可编辑项前端点击走"在文件夹中显示"
+            // v0.3.21: the tree lists all files (not just editable extensions) — clicking a non-editable item in the frontend uses "show in folder"
             files.push((name, full));
         }
         if dirs.len() + files.len() >= 3000 {
             truncated = true;
-            break; // 巨目录防线：超出截断，前端提示
+            break; // huge-folder guard: truncate beyond the limit, the frontend shows a notice
         }
     }
     let key = |v: &(String, String)| v.0.to_lowercase();
@@ -1044,19 +1162,19 @@ fn list_md_dir(path: String) -> Result<Vec<serde_json::Value>, String> {
         .chain(files.into_iter().map(|v| mk(v, false)))
         .collect();
     if truncated {
-        out.push(serde_json::json!({ "name": "…条目过多已截断", "path": "", "is_dir": false }));
+        out.push(serde_json::json!({ "name": "… too many entries, list truncated", "path": "", "is_dir": false }));
     }
     Ok(out)
 }
 
-/// 跨文件搜索命中上限与扫描护栏（大目录防卡：深挖会拖垮 UI 线程返回）
+/// Cross-file search hit limit and scan guardrails (keeps big folders from freezing: digging deep would stall the UI thread's return)
 const SEARCH_MAX_HITS: usize = 200;
 const SEARCH_MAX_FILES: usize = 800;
 const SEARCH_MAX_DEPTH: usize = 8;
 const SEARCH_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
-/// 递归搜 root 下所有文本类文件内容（忽略大小写 contains）。
-/// 返回 [{file, line_no, line_text}]，line_no 从 1 起，line_text 首尾去空白截 120 字符。
+/// Recursively search the content of all text files under root (case-insensitive contains).
+/// Returns [{file, line_no, line_text}], line_no starts at 1, line_text trimmed and cut to 120 characters.
 #[tauri::command]
 fn search_md_files(root: String, query: String) -> Result<Vec<serde_json::Value>, String> {
     let q = query.to_lowercase();
@@ -1065,7 +1183,7 @@ fn search_md_files(root: String, query: String) -> Result<Vec<serde_json::Value>
     }
     let mut hits: Vec<serde_json::Value> = vec![];
     let mut files_scanned = 0usize;
-    // 显式栈 DFS：元素 = (路径, 深度)
+    // explicit stack DFS: element = (path, depth)
     let mut stack: Vec<(PathBuf, usize)> = vec![(PathBuf::from(&root), 0)];
     while let Some((dir, depth)) = stack.pop() {
         if depth > SEARCH_MAX_DEPTH || files_scanned >= SEARCH_MAX_FILES || hits.len() >= SEARCH_MAX_HITS {
@@ -1073,7 +1191,7 @@ fn search_md_files(root: String, query: String) -> Result<Vec<serde_json::Value>
         }
         let rd = match fs::read_dir(&dir) {
             Ok(r) => r,
-            Err(_) => continue, // 无权限子目录跳过
+            Err(_) => continue, // skip subfolders without permission
         };
         for entry in rd.flatten() {
             if hits.len() >= SEARCH_MAX_HITS {
@@ -1081,6 +1199,9 @@ fn search_md_files(root: String, query: String) -> Result<Vec<serde_json::Value>
             }
             let name = entry.file_name().to_string_lossy().to_string();
             if tree_skip(&name) {
+                continue;
+            }
+            if path_is_hidden(&entry.path()) {
                 continue;
             }
             let ft = match entry.file_type() {
@@ -1096,7 +1217,7 @@ fn search_md_files(root: String, query: String) -> Result<Vec<serde_json::Value>
             if !has_allowed_ext(&name) || files_scanned >= SEARCH_MAX_FILES {
                 continue;
             }
-            // 符号链接不跟随（ft.is_dir 对 symlink 为 false，读内容即安全）
+            // symlinks are not followed (ft.is_dir is false for a symlink, so reading content is safe)
             let meta = match entry.metadata() {
                 Ok(m) => m,
                 Err(_) => continue,
@@ -1117,7 +1238,7 @@ fn search_md_files(root: String, query: String) -> Result<Vec<serde_json::Value>
                 if line.contains(&q) {
                     let mut shown = line.trim().to_string();
                     if shown.chars().count() > 120 {
-                        // 按字符截（中文安全），不按字节
+                        // cut by characters (safe for multi-byte text), not bytes
                         shown = shown.chars().take(120).collect();
                     }
                     hits.push(serde_json::json!({
@@ -1132,9 +1253,9 @@ fn search_md_files(root: String, query: String) -> Result<Vec<serde_json::Value>
     Ok(hits)
 }
 
-// ===== v0.3.0 导出中心 + 粘贴截图落地 =====
+// ===== v0.3.0 export centre + pasted screenshots saved to disk =====
 
-/// 写二进制文件（PNG/DOCX 等导出产物；前端传 base64）
+/// Write a binary file (PNG/DOCX export output; the frontend passes base64)
 #[tauri::command]
 fn save_binary_file(path: String, data_b64: String) -> Result<(), String> {
     use base64::Engine;
@@ -1144,42 +1265,42 @@ fn save_binary_file(path: String, data_b64: String) -> Result<(), String> {
     fs::write(&path, bytes).map_err(|e| e.to_string())
 }
 
-/// 读二进制文件（docx 导出嵌本地图片等；返回 base64）。失败返回 Err 由前端降级占位。
+/// Read a binary file (for embedding local images in docx export etc.; returns base64). Returns Err on failure so the frontend can use a placeholder.
 #[tauri::command]
 fn read_binary_file(path: String) -> Result<String, String> {
     use base64::Engine;
     let bytes = fs::read(&path).map_err(|e| {
-        app_log("ERROR", "open", &format!("读取失败 {path}: {e}"));
+        app_log("ERROR", "open", &format!("Read failed {path}: {e}"));
         e.to_string()
     })?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
-// ===== v0.3.17 文件树右键管理（新建/重命名/删除/资源管理器定位） =====
+// ===== v0.3.17 file tree context-menu management (new / rename / delete / show in Explorer) =====
 
-/// 名字合法性：非空且不含 Windows 路径非法字符
+/// Name validity: not empty and no characters illegal in Windows paths
 fn valid_entry_name(name: &str) -> Result<(), String> {
     let n = name.trim();
     if n.is_empty() {
-        return Err("名称不能为空".into());
+        return Err("Name cannot be empty".into());
     }
     if n.chars().any(|c| "\\/:*?\"<>|".contains(c)) {
-        return Err("名称不能包含 \\ / : * ? \" < > |".into());
+        return Err("Name cannot contain \\ / : * ? \" < > |".into());
     }
     Ok(())
 }
 
-/// 防误删/误改名盘符根（"C:\" 形态）与根以下直接操作
+/// Guard against deleting/renaming a drive root ("C:\" form) and operating directly at the root
 fn guard_not_drive_root(path: &str) -> Result<(), String> {
     let p = path.trim_end_matches('\\');
     if p.len() <= 2 && p.ends_with(':') {
-        return Err("不能对盘符根执行此操作".into());
+        return Err("Cannot do this on a drive root".into());
     }
     Ok(())
 }
 
-/// 新建文本文件（dir 下）：kind = "md" | "txt"；name 已带扩展名则原样用，否则按 kind 补。
-/// 返回新建文件完整路径（前端打开+刷新树用）。
+/// Create a text file (in dir): kind = "md" | "txt"; if name already has an extension use it as is, otherwise add one per kind.
+/// Returns the full path of the new file (for the frontend to open + refresh the tree).
 #[tauri::command]
 fn create_text_file(dir: String, name: String, kind: String) -> Result<String, String> {
     valid_entry_name(&name)?;
@@ -1190,42 +1311,42 @@ fn create_text_file(dir: String, name: String, kind: String) -> Result<String, S
     }
     let full = std::path::Path::new(&dir).join(&n);
     if full.exists() {
-        return Err(format!("已存在同名文件：{n}"));
+        return Err(format!("A file with this name already exists: {n}"));
     }
     fs::write(&full, "").map_err(|e| e.to_string())?;
     Ok(full.to_string_lossy().to_string())
 }
 
-/// 新建文件夹（dir 下）。返回完整路径。
+/// Create a folder (in dir). Returns the full path.
 #[tauri::command]
 fn create_dir(dir: String, name: String) -> Result<String, String> {
     valid_entry_name(&name)?;
     let full = std::path::Path::new(&dir).join(name.trim());
     if full.exists() {
-        return Err(format!("已存在同名项：{}", name.trim()));
+        return Err(format!("An item with this name already exists: {}", name.trim()));
     }
     fs::create_dir(&full).map_err(|e| e.to_string())?;
     Ok(full.to_string_lossy().to_string())
 }
 
-/// 重命名（同目录改名）：old=完整路径，new_name=新名字（不含目录）。
-/// 用 fs::rename（同盘原子；跨盘不会发生——同目录）。
+/// Rename (within the same folder): old = full path, new_name = new name (without folder).
+/// Uses fs::rename (atomic on the same drive; cross-drive cannot happen — same folder).
 #[tauri::command]
 fn rename_entry(old: String, new_name: String) -> Result<String, String> {
     guard_not_drive_root(&old)?;
     valid_entry_name(&new_name)?;
     let dst = std::path::Path::new(&old)
         .parent()
-        .ok_or("无父目录")?
+        .ok_or("No parent folder")?
         .join(new_name.trim());
     if dst.exists() {
-        return Err(format!("目标已存在：{}", new_name.trim()));
+        return Err(format!("Target already exists: {}", new_name.trim()));
     }
     fs::rename(&old, &dst).map_err(|e| e.to_string())?;
     Ok(dst.to_string_lossy().to_string())
 }
 
-/// 删除：文件 remove_file / 目录递归 remove_dir_all（前端已 confirm，这里再拒盘符根）
+/// Delete: file remove_file / folder recursive remove_dir_all (the frontend already confirmed; drive roots are refused again here)
 #[tauri::command]
 fn delete_entry(path: String) -> Result<(), String> {
     guard_not_drive_root(&path)?;
@@ -1237,44 +1358,44 @@ fn delete_entry(path: String) -> Result<(), String> {
     }
 }
 
-/// 在资源管理器中定位显示（explorer /select,路径）。路径不存在时 explorer 自行处理。
+/// Show in Explorer (explorer /select,path). If the path does not exist, Explorer handles it.
 #[tauri::command]
 fn reveal_path(path: String) {
     let _ = std::process::Command::new("explorer").arg(format!("/select,{path}")).spawn();
 }
 
-/// v0.3.22 自建全盘文件名索引（替代 v0.3.18 的 es.exe 外部依赖——单 exe 零依赖定调）。
-/// es.exe 路线废弃原因：它是 voidtools 闭源 CLI 且只做 IPC 查询，真正引擎是 Everything
-/// 常驻服务（MFT 直读+USN 监听），"拆代码合入"不可行（无源码、许可不允许、没服务即空壳）。
-/// 本方案：多线程遍历固定盘（每盘一线程）建内存索引（完整路径+文件名小写副本），
-/// 缓存 %APPDATA%\md-editor\file-index.txt——启动后台秒载缓存即就绪，30s 后低优先级重建
-/// 保持新鲜；无缓存则启动即构建（首次 1-3 分钟，进度实时）。搜索=多词 AND 包含匹配
-/// 文件名（es.exe 同语义），内存过滤毫秒级。无管理员权限、无第三方依赖。
+/// v0.3.22 custom drive-wide file-name index (replaces v0.3.18's external es.exe dependency — single exe, zero dependencies by design).
+/// Why es.exe was dropped: it is voidtools' closed-source CLI that only does IPC queries; the real engine is the Everything
+/// resident service (direct MFT reads + USN watching), so "merging the code in" was impossible (no source, licence forbids it, an empty shell without the service).
+/// This approach: multi-threaded walk of fixed drives (one thread per drive) into an in-memory index (full path + lowercase file name copy),
+/// cached in %APPDATA%\Mdaddy\file-index.txt — at startup the cache loads in the background in seconds and is ready, then rebuilt at low priority after 30s
+/// to stay fresh; without a cache, the build starts immediately (first time 1-3 minutes, live progress). Search = multi-word AND substring match on
+/// file names (same semantics as es.exe), filtered in memory in milliseconds. No admin rights, no third-party dependencies.
 struct IndexEntry {
-    path: String,    // 完整路径（展示/定位用）
-    name_at: usize,  // file_name 在 path 中的起始偏移（省一份 String：本机实测全量 295 万项双字符串内存 500MB+）
+    path: String,    // full path (for display/locating)
+    name_at: usize,  // start offset of file_name within path (saves a String: measured, 2.95M items with two strings used 500MB+)
     is_dir: bool,
 }
-/// 索引收录的扩展名白名单（目录全部收录）。全盘动辄数百万文件——node_modules/target/
-/// 系统 DLL 无人搜，全量收录内存和缓存都不可承受（本机实测 385MB 缓存）。
-/// 收录口径=用户会搜的：文档/代码/媒体/压缩包/安装包/字体。
+/// Extension whitelist for the index (all folders are included). A whole disk easily has millions of files — node_modules/target/
+/// system DLLs nobody searches; including everything is unbearable for memory and cache (385MB cache measured here).
+/// Included = what users search for: documents/code/media/archives/installers/fonts.
 const INDEX_EXTS: &[&str] = &[
-    // 文档
+    // documents
     "md", "markdown", "mdown", "txt", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
     "pdf", "epub", "mobi", "csv", "tsv", "json", "xml", "yaml", "yml", "ini", "cfg",
     "conf", "log", "rtf", "odt", "ots",
-    // 代码
+    // code
     "js", "jsx", "ts", "tsx", "py", "rs", "go", "java", "c", "h", "cpp", "hpp",
     "cs", "php", "rb", "sh", "bat", "ps1", "html", "htm", "css", "scss", "vue", "sql", "ipynb",
-    // 媒体
+    // media
     "png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "tif", "tiff",
     "mp3", "wav", "flac", "aac", "ogg", "m4a",
     "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm",
-    // 压缩/安装/字体
+    // archives/installers/fonts
     "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso", "exe", "msi",
     "ttf", "otf", "woff", "woff2",
 ];
-/// ASCII 忽略大小写包含匹配（非 ASCII 字节原样比：UTF-8 中文无大小写，语义正确）
+/// ASCII case-insensitive contains (non-ASCII bytes compared as is: multi-byte scripts have no case, semantically correct)
 fn ascii_ci_contains(hay: &str, needle: &str) -> bool {
     let h = hay.as_bytes(); let n = needle.as_bytes();
     if n.is_empty() || h.len() < n.len() { return n.is_empty(); }
@@ -1291,13 +1412,13 @@ fn ascii_ci_contains(hay: &str, needle: &str) -> bool {
 static INDEX: std::sync::RwLock<Vec<IndexEntry>> = std::sync::RwLock::new(Vec::new());
 static INDEX_BUILDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static INDEX_SCANNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// walk 线程→合并线程的批量缓冲（512 条一批入锁，压锁频次）
+/// batch buffer from walk threads → merge thread (512 entries per lock, fewer lock acquisitions)
 static INDEX_BUF: std::sync::Mutex<Vec<IndexEntry>> = std::sync::Mutex::new(Vec::new());
-/// 存活 walk 线程计数（合并线程判收尾）
+/// count of live walk threads (the merge thread uses it to finish)
 static WALK_ALIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// 把当前线程降到最低调度优先级（索引重建用）：HDD 全盘遍历重 IO，
-/// 正常优先级会拖慢 UI 响应（实测表格浮动面板弹出超时）——后台任务须让路。
+/// Drop the current thread to the lowest scheduling priority (for index rebuilds): a full HDD walk is IO heavy,
+/// and at normal priority it slows UI responses (measured: the table floating panel timed out) — background work must yield.
 fn lower_thread_priority() {
     #[cfg(windows)]
     unsafe {
@@ -1305,23 +1426,23 @@ fn lower_thread_priority() {
         extern "system" {
             fn SetThreadPriority(thread: isize, priority: i32) -> i32;
         }
-        // GetCurrentThread() 伪句柄 = -1；THREAD_PRIORITY_LOWEST = -2
+        // GetCurrentThread() pseudo handle = -1; THREAD_PRIORITY_LOWEST = -2
         SetThreadPriority(-1, -2);
     }
 }
 
 fn index_cache_path() -> PathBuf {
-    // 便携模式特例：索引的是本机磁盘文件名，不跟U盘走（换机后另一台的索引无效），
-    // 落 %TEMP% 各机自建；代价是便携版每台新机器首建索引（1-3 分钟，同安装版冷启动）。
+    // Portable mode special case: the index holds this machine's file names and does not travel on the USB drive (useless on another machine),
+    // so it lives in %TEMP% and each machine builds its own; the cost is a first build on each new machine (1-3 minutes, same as an installed cold start).
     if portable_dir().is_some() {
         let t = std::env::var("TEMP").unwrap_or_else(|_| ".".into());
-        return PathBuf::from(t).join("md-editor").join("file-index.txt");
+        return PathBuf::from(t).join("Mdaddy").join("file-index.txt");
     }
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("md-editor").join("file-index.txt")
+    PathBuf::from(base).join("Mdaddy").join("file-index.txt")
 }
 
-/// 固定盘根列表（遍历目标）：C..Z 探测可读根，排除光驱/可移动盘（读光驱会卡转盘）。
+/// Fixed drive roots (walk targets): probe C..Z for readable roots, excluding optical/removable drives (reading an optical drive blocks while it spins up).
 fn fixed_drive_roots() -> Vec<PathBuf> {
     (b'C'..=b'Z')
         .map(|c| PathBuf::from(format!("{}:\\", c as char)))
@@ -1329,21 +1450,21 @@ fn fixed_drive_roots() -> Vec<PathBuf> {
         .collect()
 }
 
-/// 递归遍历一目录树（无权限静默跳过；symlink/junction 不跟随防环）。
-/// 命中项攒本地批量，512 条推一次共享缓冲（锁频次降 512 倍）。
+/// Recursively walk a folder tree (silently skip no-permission folders; symlinks/junctions not followed, avoiding loops).
+/// Hits accumulate in a local batch, pushed to the shared buffer every 512 (512× fewer lock acquisitions).
 fn walk_into(dir: &PathBuf, batch: &mut Vec<IndexEntry>) {
     let rd = match std::fs::read_dir(dir) {
         Ok(r) => r,
-        Err(_) => return, // 无权限/被占用：跳过整棵
+        Err(_) => return, // no permission / in use: skip the whole subtree
     };
     for e in rd.flatten() {
         let Ok(ft) = e.file_type() else { continue };
         if ft.is_symlink() {
-            continue; // junction/symlink：不跟随（All Users→ProgramData 类环会死循环）
+            continue; // junction/symlink: not followed (loops like All Users → ProgramData would never end)
         }
         let is_dir = ft.is_dir();
         let p = e.path();
-        // 白名单过滤（目录全收；文件按扩展名）——全量收录内存/缓存不可承受（295 万项实锤）
+        // whitelist filter (all folders; files by extension) — including everything is unbearable for memory/cache (2.95M items confirmed)
         let take = if is_dir { true } else {
             p.extension().and_then(|x| x.to_str())
                 .map(|x| INDEX_EXTS.iter().any(|w| w.eq_ignore_ascii_case(x)))
@@ -1366,22 +1487,22 @@ fn walk_into(dir: &PathBuf, batch: &mut Vec<IndexEntry>) {
     }
 }
 
-/// 索引构建主流程（后台线程）：每盘一线程并行遍历（写共享缓冲），合并线程每 3s
-/// 把缓冲搬进 INDEX——搜索端即刻可查已扫描部分（v0.3.22 边建边搜：本机实测全盘
-/// 295 万项 HDD 上 8 分钟扫不完，「建完才能搜」会把用户晾数分钟，不可接受）。
-/// 完成后 shrink+原子写缓存。INDEX_BUILDING 期间 es_search 返回部分命中。
+/// Main index build (background thread): one thread per drive walks in parallel (writing the shared buffer), the merge thread every 3s
+/// moves the buffer into INDEX — searches can immediately query the scanned part (v0.3.22 search while building: measured, a full
+/// HDD of 2.95M items was not done after 8 minutes; "search only when finished" would leave users waiting minutes, unacceptable).
+/// After completion shrink + atomic cache write. While INDEX_BUILDING, es_search returns partial hits.
 fn build_index() {
     if INDEX_BUILDING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return; // 已在构建，防重入
+        return; // already building, prevent reentry
     }
-    app_log("INFO", "index", "全盘索引构建开始");
+    app_log("INFO", "index", "Drive-wide index build started");
     INDEX_SCANNED.store(0, std::sync::atomic::Ordering::Relaxed);
-    INDEX.write().unwrap().clear(); // 重建从零开始（防新旧混叠）
+    INDEX.write().unwrap().clear(); // rebuild from scratch (no mixing old and new)
     let roots = fixed_drive_roots();
     WALK_ALIVE.store(roots.len(), std::sync::atomic::Ordering::Relaxed);
     for root in roots {
         std::thread::spawn(move || {
-            lower_thread_priority(); // 重建=后台低优先级：不与用户编辑/点击抢 CPU 调度
+            lower_thread_priority(); // rebuild = background low priority: do not compete with user edits/clicks for CPU
             let mut batch: Vec<IndexEntry> = vec![];
             walk_into(&root, &mut batch);
             if !batch.is_empty() {
@@ -1392,7 +1513,7 @@ fn build_index() {
             WALK_ALIVE.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         });
     }
-    // 合并+缓存写出线程：3s 周期搬缓冲→INDEX；walk 全部结束后收尾搬+shrink+写缓存
+    // merge + cache writer thread: move buffer → INDEX every 3s; when all walks finish, final move + shrink + cache write
     let t0 = std::time::Instant::now();
     std::thread::spawn(move || {
         loop {
@@ -1413,7 +1534,7 @@ fn build_index() {
                     INDEX.write().unwrap().extend(drained);
                 }
                 INDEX.write().unwrap().shrink_to_fit();
-                // 缓存原子写（tmp+rename）：行格式 "D\t路径"/"F\t路径"
+                // atomic cache write (tmp + rename): line format "D\tpath" / "F\tpath"
                 let n = INDEX.read().unwrap().len();
                 let cache = index_cache_path();
                 if let Some(d) = cache.parent() {
@@ -1435,7 +1556,7 @@ fn build_index() {
                 }
                 INDEX_BUILDING.store(false, std::sync::atomic::Ordering::SeqCst);
                 app_log("INFO", "index", &format!(
-                    "全盘索引构建完成: {} 项, 耗时 {:.0}s",
+                    "Drive-wide index build done: {} items, {:.0}s",
                     n, t0.elapsed().as_secs_f64()));
                 return;
             }
@@ -1443,8 +1564,8 @@ fn build_index() {
     });
 }
 
-/// 启动索引管线（setup 调一次）：有缓存→后台载入即就绪，载入后 30s 重建刷新；
-/// 无缓存→立即构建（边建边搜）。缓存损坏按无缓存处理。
+/// Start the index pipeline (setup calls it once): cache present → loaded in the background and ready, rebuilt 30s later to refresh;
+/// no cache → build immediately (search while building). A corrupt cache is treated as no cache.
 fn start_index_pipeline() {
     std::thread::spawn(|| {
         let cache = index_cache_path();
@@ -1470,16 +1591,16 @@ fn start_index_pipeline() {
         if let Some(v) = loaded {
             INDEX_SCANNED.store(v.len(), std::sync::atomic::Ordering::Relaxed);
             *INDEX.write().unwrap() = v;
-            // 缓存只是"先能用"：延迟 10 分钟再重建（错开用户"打开就搜/就编辑"高峰；
-            // 30s 就重建曾实锤拖慢表格面板弹出——HDD 全盘遍历重 IO，走最低线程优先级）
+            // the cache is just "usable first": rebuild after a 10-minute delay (avoids the "open and search/edit right away" peak;
+            // rebuilding after 30s was confirmed to slow the table panel — a full HDD walk is IO heavy, so it runs at the lowest thread priority)
             std::thread::sleep(std::time::Duration::from_secs(600));
         }
         build_index();
     });
 }
 
-/// 全盘文件名搜索（v0.3.22 自建索引，边建边搜）：完全无数据（构建刚开始）才报
-/// INDEX_BUILDING:<已扫描数>；有数据=Ok(命中)——构建中命中的是已扫描部分。
+/// Drive-wide file-name search (v0.3.22 custom index, search while building): only when there is no data at all (build just started) report
+/// INDEX_BUILDING:<scanned count>; with data = Ok(hits) — during a build the hits come from the scanned part.
 #[tauri::command]
 fn es_search(query: String, limit: u32) -> Result<Vec<EsHit>, String> {
     let q = query.trim().to_lowercase();
@@ -1494,9 +1615,9 @@ fn es_search(query: String, limit: u32) -> Result<Vec<EsHit>, String> {
             INDEX_SCANNED.load(std::sync::atomic::Ordering::Relaxed)
         ));
     }
-    // 空格拆词 AND 匹配文件名（ASCII 忽略大小写）；路径短的相关度高更靠前
-    // v0.3.28 ext: 过滤语法恢复（v0.3.22 自建索引切替时丢失）：ext:md=只留 .md 文件
-    // （可多个 ext:token 取并集，多个扩展名写法 ext:md,txt 也接受）；其余词仍 AND 匹配文件名
+    // split on spaces, AND-match file names (ASCII case-insensitive); shorter paths rank higher
+    // v0.3.28 ext: filter syntax restored (lost when switching to the v0.3.22 custom index): ext:md = only .md files
+    // (several ext: tokens are unioned, ext:md,txt also accepted); the remaining words still AND-match file names
     let mut terms: Vec<String> = Vec::new();
     let mut exts: Vec<String> = Vec::new();
     for tok in q.split_whitespace() {
@@ -1536,25 +1657,32 @@ fn es_search(query: String, limit: u32) -> Result<Vec<EsHit>, String> {
     Ok(hits)
 }
 
-/// 命中项（path=完整路径；is_dir=是否目录，前端点击分流用）——字段与 es.exe 时代一致
+/// A hit (path = full path; is_dir = folder or not, for routing frontend clicks) — same fields as in the es.exe era
 #[derive(serde::Serialize, Debug)]
 struct EsHit {
     path: String,
     is_dir: bool,
 }
 
-/// 写导出用文本文件（HTML 等）。与 save_file 分离：导出产物不受 md/txt 白名单限制，
-/// 也不做空内容覆盖防护（导出内容来自渲染管线而非编辑器取值）。
+/// Write a text file for export (HTML etc.). Separate from save_file: export output is not limited to the md/txt whitelist
+/// and has no empty-overwrite guard (export content comes from the render pipeline, not the editor value).
 #[tauri::command]
 fn write_export_file(path: String, content: String) -> Result<(), String> {
     fs::write(&path, content).map_err(|e| e.to_string())
 }
 
-/// 粘贴截图落地：存到文档同目录 assets/ 子目录（未命名文档 doc_dir 为空 → 存
-/// %APPDATA%/<id>/pasted/ 并返回绝对路径）。文件名=截图_yyyyMMdd_HHmmss（同秒多个加序号）。
-/// 返回 (相对引用路径, 绝对路径)。中文文件名保留原文（md 引用按需编码由前端处理）。
+/// Save a pasted screenshot: into an assets/ subfolder next to the document (for an untitled document doc_dir is empty → saved to
+/// %APPDATA%/<id>/pasted/ and the absolute path is returned). File name = Screenshot_yyyyMMdd_HHmmss (a counter is added for several in the same second).
+/// Returns (relative reference path, absolute path). Non-ASCII file names are kept as is (the frontend encodes md references when needed).
 #[tauri::command]
-fn save_paste_image(app: AppHandle, doc_dir: String, ext: String, data_b64: String) -> Result<serde_json::Value, String> {
+fn save_paste_image(
+    app: AppHandle,
+    doc_dir: String,
+    ext: String,
+    data_b64: String,
+    image_dir: Option<String>,
+    stamp: Option<String>,
+) -> Result<serde_json::Value, String> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data_b64.as_bytes())
@@ -1567,22 +1695,42 @@ fn save_paste_image(app: AppHandle, doc_dir: String, ext: String, data_b64: Stri
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_secs();
-    // 本地时区 yyyyMMdd_HHmmss（无 chrono 依赖：用秒数换算 UTC+8，中国时区场景足够）
+    // local time yyyyMMdd_HHmmss (no chrono dependency: seconds converted with UTC+8)
     let local = now + 8 * 3600;
     let days = local / 86400;
     let (y, mo, d) = civil_from_days(days as i64);
     let secs = local % 86400;
-    let base = format!("截图_{:04}{:02}{:02}_{:02}{:02}{:02}", y, mo, d, secs / 3600, secs % 3600 / 60, secs % 60);
+    // the frontend passes its local-time stamp (yyyyMMdd_HHmmss); the UTC+8 computation is only a fallback
+    let stamp = stamp
+        .filter(|s| s.len() == 15 && s.chars().all(|c| c.is_ascii_digit() || c == '_'))
+        .unwrap_or_else(|| format!("{:04}{:02}{:02}_{:02}{:02}{:02}", y, mo, d, secs / 3600, secs % 3600 / 60, secs % 60));
+    let base = format!("Screenshot_{stamp}");
 
-    let (dir, rel) = if doc_dir.is_empty() {
+    let custom = image_dir.as_deref().and_then(extras::resolve_image_dir);
+    let (dir, rel) = if let Some(cd) = custom {
+        // custom image folder (Settings > Images): relative reference when it sits under the document folder, absolute otherwise
+        let rel = if doc_dir.is_empty() {
+            String::new()
+        } else {
+            let docp = PathBuf::from(&doc_dir);
+            cd.strip_prefix(&docp)
+                .ok()
+                .map(|r| {
+                    let r = r.to_string_lossy().replace('\\', "/");
+                    if r.is_empty() { "./".to_string() } else { format!("{r}/") }
+                })
+                .unwrap_or_default()
+        };
+        (cd, rel)
+    } else if doc_dir.is_empty() {
         let d = data_root(&app)?.join("pasted");
-        (d, String::new()) // 未命名文档：无相对基准，用绝对路径引用
+        (d, String::new()) // untitled document: no relative base, reference by absolute path
     } else {
         let d = PathBuf::from(&doc_dir).join("assets");
         (d, format!("assets/"))
     };
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    // 同秒冲突加序号
+    // same-second collision: add a counter
     let mut name = format!("{base}.{ext}");
     let mut i = 1;
     while dir.join(&name).exists() {
@@ -1596,7 +1744,7 @@ fn save_paste_image(app: AppHandle, doc_dir: String, ext: String, data_b64: Stri
     Ok(serde_json::json!({ "rel": rel_str, "abs": abs_str }))
 }
 
-/// 公历换算（Howard Hinnant 算法，civil_from_days）
+/// Gregorian conversion (Howard Hinnant's algorithm, civil_from_days)
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
@@ -1610,15 +1758,15 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// WebView2 Runtime 缺失检测：任一注册表位置有 pv 值即视为已装。
-/// WEBVIEW2_BROWSER_EXECUTABLE_FOLDER 显式指定固定版本时跳过（企业离线分发场景）。
+/// WebView2 Runtime missing check: any registry location with a pv value counts as installed.
+/// Skipped when WEBVIEW2_BROWSER_EXECUTABLE_FOLDER explicitly pins a fixed version (enterprise offline distribution).
 fn webview2_missing() -> bool {
     if std::env::var_os("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER").is_some() {
         return false;
     }
-    // v0.5.1 启动加速：文件系统目录探测替代 4 次 reg query 子进程（实测最坏 ~390ms → ~1ms）。
-    // Evergreen 运行时的安装位置固定：per-machine=%ProgramFiles(x86)%、per-user=%LOCALAPPDATA%
-    // 下的 Microsoft\EdgeWebView\Application\，目录由安装器创建，存在即已安装（损坏场景 reg 探测同样无解）。
+    // v0.5.1 faster startup: file-system folder probing replaces 4 reg query child processes (measured worst case ~390ms → ~1ms).
+    // The Evergreen runtime installs to fixed locations: per-machine = %ProgramFiles(x86)%, per-user = %LOCALAPPDATA%
+    // under Microsoft\EdgeWebView\Application\; the installer creates the folder, so existing = installed (a broken install defeats reg probing too).
     for base in [std::env::var_os("ProgramFiles(x86)"), std::env::var_os("LOCALAPPDATA")] {
         if let Some(b) = base {
             if PathBuf::from(&b).join(r"Microsoft\EdgeWebView\Application").is_dir() {
@@ -1629,8 +1777,8 @@ fn webview2_missing() -> bool {
     true
 }
 
-// 零依赖弹窗（不依赖 WebView2，user32 直调）：缺失 WebView2 时给用户可读指引，
-// 替代"双击无反应/白屏"的不可诊断失败。
+// Zero-dependency message box (no WebView2 needed, calls user32 directly): gives users readable guidance when WebView2 is missing,
+// instead of an undiagnosable "double-click does nothing / white screen" failure.
 #[cfg(windows)]
 #[link(name = "user32")]
 extern "system" {
@@ -1646,33 +1794,33 @@ fn fatal_msgbox(text: &str, caption: &str) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // v0.3.23 运行日志首行：run() 第一件事（覆盖开机第一行，不留观测盲区）
+    // v0.3.23 first run-log line: the very first thing run() does (covers the first line at startup, no observability blind spot)
     log_startup(&std::env::args().skip(1).collect::<Vec<_>>().join(" "));
-    // v0.5.0 便携模式：WebView2 数据目录（缓存/localStorage）→ %TEMP%，宿主机不留痕。
-    // 必须在 WebView 创建（Builder 之后）前设好；偏好数据由 Data/settings.json 随U盘走，
-    // %TEMP% 里只有可重建的缓存，系统清理/重启即无。
+    // v0.5.0 portable mode: WebView2 data folder (cache/localStorage) → %TEMP%, leaving no trace on the host machine.
+    // Must be set before the WebView is created (after the Builder); preference data travels on the USB drive in Data/settings.json,
+    // %TEMP% only holds rebuildable cache, gone after system cleanup/reboot.
     if let Some(pd) = portable_dir_owned() {
-        app_log("INFO", "portable", &format!("便携模式已启用：Data={}", pd.display()));
+        app_log("INFO", "portable", &format!("Portable mode enabled: Data={}", pd.display()));
         let tmp = std::env::var("TEMP").unwrap_or_else(|_| ".".into());
-        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", PathBuf::from(tmp).join("md-editor").join("webview"));
+        std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", PathBuf::from(tmp).join("Mdaddy").join("webview"));
     }
-    // 启动预检：WebView2 Runtime 缺失（极老/精简系统）时 Tauri 会静默失败或白屏，
-    // 先给出可读指引再退出（明算工具缺 VC++ DLL 用户机起不来的同类教训）。
+    // Startup pre-check: when the WebView2 Runtime is missing (very old/stripped systems) Tauri fails silently or shows a white screen,
+    // so give readable guidance before exiting (same lesson as tools that would not start on machines missing VC++ DLLs).
     #[cfg(windows)]
     {
         if webview2_missing() {
             fatal_msgbox(
-                "缺少 Microsoft WebView2 运行库（Windows 10/11 一般自带）。\n\n\
-                 请安装 WebView2 Runtime 后重试：\n\
+                "Microsoft WebView2 Runtime is missing (usually built into Windows 10/11).\n\n\
+                 Please install the WebView2 Runtime and try again:\n\
                  https://developer.microsoft.com/microsoft-edge/webview2/\n\
-                 （选 Evergreen Standalone 离线包；内网机器可在有网机器下载后拷入安装）",
-                "无法启动 MD 编辑器",
+                 (Evergreen Standalone installer works offline.)",
+                "Mdaddy cannot start",
             );
             std::process::exit(1);
         }
     }
-    // --self-test-pdf <out.pdf>：无 GUI 端到端验证 msedge 管线（部署机预检 / 自动化测试）
-    // 命中即用固定 HTML 走完整 export_pdf 管线后退出，不启动 GUI。
+    // --self-test-pdf <out.pdf>: verify the msedge pipeline end to end without a GUI (deployment pre-check / automated tests)
+    // When present, run the full export_pdf pipeline with fixed HTML and exit without starting the GUI.
     let args_vec: Vec<String> = std::env::args().collect();
     if let Some(pos) = args_vec.iter().position(|a| a == "--self-test-pdf") {
         match args_vec.get(pos + 1) {
@@ -1687,31 +1835,43 @@ pub fn run() {
                 }
             },
             None => {
-                eprintln!("SELF_TEST_ERR --self-test-pdf 需要一个输出路径参数");
+                eprintln!("SELF_TEST_ERR --self-test-pdf needs an output path argument");
                 std::process::exit(1);
             }
         }
     }
 
     let startup = extract_md_arg();
-
-    tauri::Builder::default()
-        // 单实例必须第一个注册：程序已运行时再次双击 .md，把文件路径转发给已运行实例
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            let file = extract_md_from_args(argv.iter().cloned());
-            if let Some(f) = file {
-                let _ = app.emit("open-file", f);
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.set_focus();
+    let new_instance = args_vec.iter().any(|arg| arg == "--mdaddy-new-instance");
+    let mut builder = tauri::Builder::default();
+    if !new_instance {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            let id = NEXT_INSTANCE_REQUEST.fetch_add(1, Ordering::Relaxed);
+            if let Some(requests) = app.try_state::<InstanceRequests>() {
+                if let Ok(mut queue) = requests.0.lock() {
+                    queue.push(PendingInstanceRequest {
+                        id,
+                        args: argv,
+                        cwd: PathBuf::from(cwd),
+                        shown: false,
+                    });
                 }
+                let _ = app.emit("instance-request", ());
             }
-        }))
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(StartupFile(Mutex::new(startup)))
+        .manage(InstanceRequests::default())
         .setup(|_app| {
-            // v0.3.22 自建全盘索引管线：缓存秒载→延迟重建/无缓存即建（后台线程不阻塞 UI）
+            // v0.3.22 custom drive-wide index pipeline: cache loads in seconds → delayed rebuild / no cache builds right away (background thread, never blocks the UI)
             start_index_pipeline();
             Ok(())
         })
@@ -1722,6 +1882,8 @@ pub fn run() {
             read_version,
             export_pdf,
             get_startup_file,
+            take_instance_requests,
+            resolve_instance_request,
             find_pdf_source,
             open_pdf_external,
             open_dropped_pdf,
@@ -1738,6 +1900,7 @@ pub fn run() {
             list_theme_files,
             read_theme_css,
             list_md_dir,
+            folder_custom_icon,
             list_drives,
             create_text_file,
             create_dir,
@@ -1749,7 +1912,15 @@ pub fn run() {
             export_diagnostics,
             search_md_files,
             dnd_selftest_enabled,
-            print_webview
+            print_webview,
+            extras::ai_shelf_models,
+            extras::ai_http,
+            extras::ai_cli,
+            extras::ai_cli_available,
+            extras::known_folders,
+            extras::launch_app,
+            extras::send_targets_available,
+            extras::temp_dir_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1757,69 +1928,69 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    // 测试产品代码本身（非镜像副本）：use super::* 直访私有函数，零可见性改动
+    // Tests the product code itself (not a mirrored copy): use super::* reaches private functions directly, no visibility changes
     use super::*;
     use std::fs;
 
     #[test]
     fn portable_dir_detection() {
-        // v0.5.0 便携判据：exe 旁 Data 目录存在→Some；不存在/无父路径→None。
-        // 不碰真实 exe（PORTABLE_DIR 全局缓存在测试进程里无 Data 应为 None，仅作旁证）。
+        // v0.5.0 portable rule: Data folder next to the exe exists → Some; missing / no parent path → None.
+        // Does not touch the real exe (the PORTABLE_DIR global cache in the test process has no Data and should be None, only as side evidence).
         let tmp = std::env::temp_dir().join(format!("mde-portable-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         let exe = tmp.join("md-editor.exe");
-        // 无 Data 目录 → None
+        // no Data folder → None
         fs::create_dir_all(&tmp).unwrap();
         assert_eq!(portable_dir_at(&exe), None);
-        // 建 Data → Some(其路径)
+        // create Data → Some(its path)
         fs::create_dir_all(tmp.join("Data")).unwrap();
         let got = portable_dir_at(&exe).unwrap();
         assert_eq!(got, tmp.join("Data"));
-        // exe 在根目录（无父目录分量异常场景由 parent() 天然返回 None 分支覆盖，不构造）
+        // exe at a root folder (the no-parent edge case is naturally covered by parent() returning None, not constructed)
         assert_eq!(portable_dir_at(std::path::Path::new("md-editor.exe")), None);
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn es_search_selfindex_queries() {
-        // v0.3.22 自建索引查询逻辑（注入小索引，不触发全盘构建）：
-        // 多词 AND、大小写不敏感（ascii_ci_contains）、目录命中、limit 截断、未就绪语义
+        // v0.3.22 custom index query logic (inject a small index, no drive-wide build triggered):
+        // multi-word AND, case-insensitive (ascii_ci_contains), folder hits, limit truncation, not-ready semantics
         fn entry(path: &str, is_dir: bool) -> IndexEntry {
             let name_at = path.rfind(['\\', '/']).map(|i| i + 1).unwrap_or(0);
             IndexEntry { path: path.into(), name_at, is_dir }
         }
         *INDEX.write().unwrap() = vec![
-            entry(r"C:\docs\年度报告.md", false),
+            entry("C:\\docs\\\u{5e74}\u{5ea6}\u{62a5}\u{544a}.md", false),
             entry(r"C:\docs\Report-2026.md", false),
-            entry(r"C:\docs\报告资料", true),
+            entry("C:\\docs\\\u{62a5}\u{544a}\u{8d44}\u{6599}", true),
             entry(r"D:\notes\todo.txt", false),
         ];
         INDEX_BUILDING.store(false, std::sync::atomic::Ordering::Relaxed);
-        // 单词命中（大小写不敏感：REPORT 命中 Report-2026）
+        // single word hit (case-insensitive: REPORT matches Report-2026)
         let hits = es_search("report".into(), 10).unwrap();
         assert!(hits.iter().any(|h| h.path.ends_with("Report-2026.md")), "{hits:?}");
-        // 多词 AND：报告+md 只命中「年度报告.md」（目录"报告资料"无 md 词、Report-2026 无中文词）
-        let hits = es_search("报告 md".into(), 10).unwrap();
+        // multi-word AND: the non-ASCII word + md only matches the annual-report .md (the folder has no "md" word, Report-2026 lacks the non-ASCII word)
+        let hits = es_search("\u{62a5}\u{544a} md".into(), 10).unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
-        assert!(hits[0].path.ends_with("年度报告.md"));
-        // limit 截断
+        assert!(hits[0].path.ends_with("\u{5e74}\u{5ea6}\u{62a5}\u{544a}.md"));
+        // limit truncation
         let hits = es_search("md".into(), 1).unwrap();
         assert_eq!(hits.len(), 1);
-        // v0.3.28 ext: 过滤（切自建索引时丢的语法）：词+扩展名 AND；ext: 排除目录；
-        // 多扩展名并集（逗号）；纯 ext: 也有效
-        let hits = es_search("报告 ext:md".into(), 10).unwrap();
+        // v0.3.28 ext: filter (syntax lost when switching to the custom index): word + extension AND; ext: excludes folders;
+        // several extensions are unioned (comma); a bare ext: also works
+        let hits = es_search("\u{62a5}\u{544a} ext:md".into(), 10).unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
-        assert!(hits[0].path.ends_with("年度报告.md"));
-        let hits = es_search("报告 ext:md,txt".into(), 10).unwrap();
+        assert!(hits[0].path.ends_with("\u{5e74}\u{5ea6}\u{62a5}\u{544a}.md"));
+        let hits = es_search("\u{62a5}\u{544a} ext:md,txt".into(), 10).unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
-        assert!(hits[0].path.ends_with("年度报告.md"));
+        assert!(hits[0].path.ends_with("\u{5e74}\u{5ea6}\u{62a5}\u{544a}.md"));
         let hits = es_search("ext:txt".into(), 10).unwrap();
         assert!(hits.iter().all(|h| h.path.ends_with(".txt")) && !hits.is_empty(), "{hits:?}");
         let hits = es_search("todo ext:txt".into(), 10).unwrap();
         assert!(hits.iter().any(|h| h.path.ends_with("todo.txt")), "{hits:?}");
-        // 空查询
+        // empty query
         assert!(es_search("  ".into(), 10).unwrap().is_empty());
-        // 清空索引+构建中 → 未就绪语义
+        // cleared index + building → not-ready semantics
         INDEX.write().unwrap().clear();
         INDEX_BUILDING.store(true, std::sync::atomic::Ordering::Relaxed);
         INDEX_SCANNED.store(42, std::sync::atomic::Ordering::Relaxed);
@@ -1829,17 +2000,17 @@ mod tests {
     #[test]
     fn ascii_ci_contains_cases() {
         assert!(ascii_ci_contains("Report-2026.md", "report"));
-        assert!(ascii_ci_contains("年度报告.md", "报告"));
-        assert!(ascii_ci_contains("年度报告.md", "MD"));
+        assert!(ascii_ci_contains("\u{5e74}\u{5ea6}\u{62a5}\u{544a}.md", "\u{62a5}\u{544a}"));
+        assert!(ascii_ci_contains("\u{5e74}\u{5ea6}\u{62a5}\u{544a}.md", "MD"));
         assert!(!ascii_ci_contains("Report-2026.md", "reportx"));
-        assert!(!ascii_ci_contains("报告.md", "汇报"));
+        assert!(!ascii_ci_contains("\u{62a5}\u{544a}.md", "\u{6c47}\u{62a5}"));
         assert!(ascii_ci_contains("a", ""));
     }
 
     #[test]
     fn ext_whitelist_normal() {
         for e in ["a.md", "a.markdown", "a.mdown", "a.txt"] {
-            assert!(has_allowed_ext(e), "{e} 应通过");
+            assert!(has_allowed_ext(e), "{e} should pass");
         }
     }
     #[test]
@@ -1871,14 +2042,14 @@ mod tests {
     }
     #[test]
     fn ext_traversal_passes_ext_check() {
-        // 路径穿越防护不在扩展名校验层（由前端正则+OS+用户选择兜底），此处仅验末段合法即通过
+        // path traversal protection is not in the extension check layer (covered by frontend regex + OS + user choice); here only the last segment must be valid
         assert!(has_allowed_ext("../evil.md"));
         assert!(!has_allowed_ext("../evil.exe"));
     }
 
     #[test]
     fn extract_picks_first_existing_md() {
-        // 跳过程序名，取首个存在且扩展名合法的路径
+        // skip the program name, take the first existing path with a valid extension
         let dir = std::env::temp_dir().join("md_verify_extract");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -1898,29 +2069,29 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let d = dir.to_string_lossy().to_string();
 
-        // 新建 md（补扩展名）→ 打开内容空 → txt 同理
-        let f1 = create_text_file(d.clone(), "笔记".into(), "md".into()).unwrap();
-        assert!(f1.ends_with("笔记.md") && std::path::Path::new(&f1).is_file());
-        // 已存在拒绝
-        assert!(create_text_file(d.clone(), "笔记.md".into(), "md".into()).is_err());
-        // 非法字符拒绝
+        // create md (extension added) → opens with empty content → same for txt
+        let f1 = create_text_file(d.clone(), "\u{7b14}\u{8bb0}".into(), "md".into()).unwrap();
+        assert!(f1.ends_with("\u{7b14}\u{8bb0}.md") && std::path::Path::new(&f1).is_file());
+        // already exists → refused
+        assert!(create_text_file(d.clone(), "\u{7b14}\u{8bb0}.md".into(), "md".into()).is_err());
+        // illegal characters → refused
         assert!(create_text_file(d.clone(), "a<b".into(), "md".into()).is_err());
-        // 新建文件夹
-        let sub = create_dir(d.clone(), "子夹".into()).unwrap();
+        // create folder
+        let sub = create_dir(d.clone(), "\u{5b50}\u{5939}".into()).unwrap();
         assert!(std::path::Path::new(&sub).is_dir());
-        // 重命名：文件与目录各一
-        let f2 = rename_entry(f1.clone(), "改名.md".into()).unwrap();
+        // rename: one file and one folder
+        let f2 = rename_entry(f1.clone(), "\u{6539}\u{540d}.md".into()).unwrap();
         assert!(!std::path::Path::new(&f1).exists() && std::path::Path::new(&f2).exists());
-        let sub2 = rename_entry(sub.clone(), "子夹2".into()).unwrap();
+        let sub2 = rename_entry(sub.clone(), "\u{5b50}\u{5939}2".into()).unwrap();
         assert!(std::path::Path::new(&sub2).is_dir());
-        // 目标已存在拒绝
-        let _ = create_text_file(d.clone(), "占用.md".into(), "md".into()).unwrap();
-        assert!(rename_entry(f2.clone(), "占用.md".into()).is_err());
-        // 删除：文件与目录（递归）
+        // target exists → refused
+        let _ = create_text_file(d.clone(), "\u{5360}\u{7528}.md".into(), "md".into()).unwrap();
+        assert!(rename_entry(f2.clone(), "\u{5360}\u{7528}.md".into()).is_err());
+        // delete: file and folder (recursive)
         delete_entry(f2).unwrap();
-        let _ = create_text_file(sub2.clone(), "内.txt".into(), "txt".into()).unwrap();
+        let _ = create_text_file(sub2.clone(), "\u{5185}.txt".into(), "txt".into()).unwrap();
         delete_entry(sub2).unwrap();
-        // 盘符根防护
+        // drive root guard
         assert!(delete_entry("C:\\".into()).is_err());
         assert!(rename_entry("F:\\".into(), "x".into()).is_err());
         let _ = fs::remove_dir_all(&dir);
@@ -1928,39 +2099,39 @@ mod tests {
 
     #[test]
     fn list_drives_returns_existing_roots() {
-        // 本机至少有 C:；每项 path 均为 "X:\" 形态且 is_dir=true
+        // this machine has at least C:; every path is in "X:\" form with is_dir=true
         let out = list_drives();
-        assert!(!out.is_empty(), "本机至少一个盘符");
+        assert!(!out.is_empty(), "at least one drive on this machine");
         assert!(out.iter().any(|v| v["path"].as_str().unwrap() == "C:\\"));
         for v in &out {
             let p = v["path"].as_str().unwrap();
-            assert!(p.len() == 3 && p.ends_with(":\\"), "盘符形态: {p}");
+            assert!(p.len() == 3 && p.ends_with(":\\"), "drive form: {p}");
             assert!(v["is_dir"].as_bool().unwrap());
         }
     }
 
     #[test]
     fn file_meta_reports_mtime_and_size() {
-        // v0.3.26 外部修改检测：正常文件返回 mtime+size；mtime 单调（两次写之间）；不存在返回 Err
+        // v0.3.26 external change detection: a normal file returns mtime+size; mtime is monotonic (between two writes); missing returns Err
         let dir = tempdir();
         let p = dir.join("m.md");
         fs::write(&p, "hello").unwrap();
         let m1 = file_meta(p.to_str().unwrap().to_string()).unwrap();
-        assert_eq!(m1.size, 5, "size 应为字节数");
-        assert!(m1.mtime_ms > 1_500_000_000_000, "mtime 应为毫秒级现代时间戳: {}", m1.mtime_ms);
-        // 追加后 size 变化
+        assert_eq!(m1.size, 5, "size should be in bytes");
+        assert!(m1.mtime_ms > 1_500_000_000_000, "mtime should be a modern millisecond timestamp: {}", m1.mtime_ms);
+        // size changes after appending
         fs::write(&p, "hello world").unwrap();
         let m2 = file_meta(p.to_str().unwrap().to_string()).unwrap();
         assert_eq!(m2.size, 11);
-        assert!(m2.mtime_ms >= m1.mtime_ms, "mtime 不应倒退");
-        // 不存在的文件：Err（前端据此视为"文件已被删除"）
+        assert!(m2.mtime_ms >= m1.mtime_ms, "mtime must not go backwards");
+        // missing file: Err (the frontend treats it as "file was deleted")
         assert!(file_meta(dir.join("nope.md").to_str().unwrap().to_string()).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn open_file_rejects_oversize() {
-        // >16MB 在读文件前就被拒（不读内容，Err 文案含"文件过大"）；v0.3.25 从 2MB 放宽到 16MB
+        // >16MB is refused before reading (content not read, Err text contains "File too large"); raised from 2MB to 16MB in v0.3.25
         let dir = std::env::temp_dir().join("md_verify_oversize");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -1969,7 +2140,7 @@ mod tests {
         buf[0] = b'#';
         fs::write(&big, &buf).unwrap();
         let err = open_file(big.to_string_lossy().to_string()).unwrap_err();
-        assert!(err.contains("文件过大"), "err={err}");
+        assert!(err.contains("File too large"), "err={err}");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1988,9 +2159,9 @@ mod tests {
             .iter()
             .map(|v| (v["name"].as_str().unwrap().to_string(), v["is_dir"].as_bool().unwrap()))
             .collect();
-        // 目录在前；隐藏/node_modules 排除；v0.3.21 起非白名单文件（png）也列出（前端点击走"在文件夹中显示"）
+        // folders first; hidden/node_modules excluded; since v0.3.21 non-whitelisted files (png) are listed too (frontend click uses "show in folder")
         assert_eq!(names, vec![("sub".to_string(), true), ("a.md".to_string(), false), ("b.md".to_string(), false), ("img.png".to_string(), false)]);
-        assert!(list_md_dir(dir.join("不存在").to_string_lossy().to_string()).is_err());
+        assert!(list_md_dir(dir.join("does-not-exist").to_string_lossy().to_string()).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1999,11 +2170,11 @@ mod tests {
         let dir = std::env::temp_dir().join("md_verify_search");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("sub")).unwrap();
-        fs::write(dir.join("one.md"), "# 标题\n\nHello 需求词 Alpha\n").unwrap();
-        fs::write(dir.join("sub/two.md"), "需求词 second\n别的\n").unwrap();
-        fs::write(dir.join("sub/other.txt"), "需求词 in txt\n").unwrap();
-        let out = search_md_files(dir.to_string_lossy().to_string(), "需求词".to_uppercase()).unwrap();
-        // 大小写不敏感；递归命中子目录；txt 白名单内也命中
+        fs::write(dir.join("one.md"), "# \u{6807}\u{9898}\n\nHello \u{9700}\u{6c42}\u{8bcd} Alpha\n").unwrap();
+        fs::write(dir.join("sub/two.md"), "\u{9700}\u{6c42}\u{8bcd} second\n\u{522b}\u{7684}\n").unwrap();
+        fs::write(dir.join("sub/other.txt"), "\u{9700}\u{6c42}\u{8bcd} in txt\n").unwrap();
+        let out = search_md_files(dir.to_string_lossy().to_string(), "\u{9700}\u{6c42}\u{8bcd}".to_uppercase()).unwrap();
+        // case-insensitive; recursive hits in subfolders; txt is whitelisted so it hits too
         assert_eq!(out.len(), 3, "hits={out:?}");
         assert!(out.iter().all(|h| h["line_no"].as_u64().unwrap() >= 1));
         let empty = search_md_files(dir.to_string_lossy().to_string(), "".to_string()).unwrap();
@@ -2017,10 +2188,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let p = dir.join("a.md");
-        fs::write(&p, "原内容").unwrap();
-        save_file(p.to_str().unwrap().to_string(), "新内容".into()).unwrap();
-        assert_eq!(fs::read_to_string(&p).unwrap(), "新内容");
-        assert!(!dir.join("a.md.tmp").exists(), "临时文件应被清理");
+        fs::write(&p, "\u{539f}\u{5185}\u{5bb9}").unwrap();
+        save_file(p.to_str().unwrap().to_string(), "\u{65b0}\u{5185}\u{5bb9}".into()).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "\u{65b0}\u{5185}\u{5bb9}");
+        assert!(!dir.join("a.md.tmp").exists(), "temp file should be cleaned up");
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
@@ -2030,7 +2201,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let p = dir.join("evil.exe");
         let err = save_file(p.to_str().unwrap().to_string(), "x".into()).unwrap_err();
-        assert!(err.contains("不支持的保存路径"), "实际错误: {err}");
+        assert!(err.contains("Unsupported save path"), "actual error: {err}");
         assert!(!p.exists());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2045,32 +2216,32 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // ===== PDF 导出相关测试（locate_msedge 之外的纯逻辑分支；不触 msedge）=====
+    // ===== PDF export tests (pure-logic branches besides locate_msedge; msedge is never touched) =====
     #[test]
     fn version_gt_compares_numerically() {
         assert!(version_gt(&[131, 0], &[100, 0]));
-        assert!(!version_gt(&[100, 0], &[131, 0])); // 不靠字符串比较
+        assert!(!version_gt(&[100, 0], &[131, 0])); // no string comparison
         assert!(version_gt(&[150, 0, 4078, 105], &[150, 0, 4078, 99]));
         assert!(!version_gt(&[1, 2, 3], &[1, 2, 3]));
-        assert!(version_gt(&[1, 2, 4], &[1, 2])); // 长度不等，缺失段视为 0
+        assert!(version_gt(&[1, 2, 4], &[1, 2])); // different lengths, missing segments count as 0
     }
 
     #[test]
     fn pick_versioned_msedge_picks_highest() {
         let dir = tempdir();
-        // 三个版本号目录 + Installer/Application 干扰目录
+        // three version folders + Installer/Application distractor folders
         fs::create_dir_all(dir.join("100.0.0.0")).unwrap();
         fs::write(dir.join("100.0.0.0").join("msedge.exe"), "x").unwrap();
         fs::create_dir_all(dir.join("131.0.2903.86")).unwrap();
         fs::write(dir.join("131.0.2903.86").join("msedge.exe"), "x").unwrap();
         fs::create_dir_all(dir.join("99.0")).unwrap();
         fs::write(dir.join("99.0").join("msedge.exe"), "x").unwrap();
-        fs::create_dir_all(dir.join("Installer")).unwrap(); // 非纯数字点分，忽略
+        fs::create_dir_all(dir.join("Installer")).unwrap(); // not purely dotted digits, ignored
         fs::write(dir.join("Installer").join("msedge.exe"), "x").unwrap();
-        let got = pick_versioned_msedge(&dir).expect("应选到最大版本");
+        let got = pick_versioned_msedge(&dir).expect("should pick the highest version");
         assert!(
             got.to_string_lossy().contains("131.0.2903.86"),
-            "应选最大版本 131.0.2903.86，实际: {}",
+            "should pick the highest version 131.0.2903.86, got: {}",
             got.display()
         );
     }
@@ -2078,24 +2249,24 @@ mod tests {
     #[test]
     fn pick_versioned_msedge_empty_or_nonversion_dir() {
         let dir = tempdir();
-        // 空目录
+        // empty folder
         assert!(pick_versioned_msedge(&dir).is_none());
-        // 仅有非版本号子目录（无 exe）
+        // only non-version subfolders (no exe)
         fs::create_dir_all(dir.join("Installer")).unwrap();
         assert!(pick_versioned_msedge(&dir).is_none());
-        // 版本号目录但无 msedge.exe，忽略
+        // version folder without msedge.exe, ignored
         fs::create_dir_all(dir.join("1.0.0.0")).unwrap();
         assert!(pick_versioned_msedge(&dir).is_none());
     }
 
     #[test]
     fn export_pdf_rejects_non_pdf_ext() {
-        // 非法扩展名在校验阶段返回，不触 msedge。直接测 render_pdf 核心管线（export_pdf wrapper
-        // 需 AppHandle，无 app context 无法在单测里构造）。
+        // an illegal extension returns at validation, msedge is never touched. Tests the render_pdf core pipeline directly (the export_pdf wrapper
+        // needs an AppHandle, which cannot be built in a unit test without an app context).
         let dir = tempdir();
         let p = dir.join("out.txt");
         let err = render_pdf("<p>x</p>".into(), p.to_str().unwrap().to_string(), |_, _| {}).unwrap_err();
-        assert!(err.contains("仅 .pdf"), "实际错误: {err}");
+        assert!(err.contains(".pdf only"), "actual error: {err}");
         assert!(!p.exists());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2104,30 +2275,30 @@ mod tests {
     fn unique_suffix_format() {
         let a = unique_suffix();
         let parts: Vec<&str> = a.splitn(2, '_').collect();
-        assert_eq!(parts.len(), 2, "格式应为 pid_nanos: {}", a);
+        assert_eq!(parts.len(), 2, "format should be pid_nanos: {}", a);
         assert_eq!(parts[0].parse::<u32>().unwrap(), std::process::id());
-        assert!(parts[1].parse::<u128>().is_ok(), "nanos 部分应为数字: {}", a);
-        // M1 核心不变量：连续两次调用必须不同（消除快速连点 SingletonLock）。
-        // 若改 SystemTime 来源或时钟精度退化（如旧系统 15ms 回退路径），此断言作回归守卫。
+        assert!(parts[1].parse::<u128>().is_ok(), "nanos part should be numeric: {}", a);
+        // M1 core invariant: two consecutive calls must differ (removes the rapid-click SingletonLock collision).
+        // If the SystemTime source changes or clock precision degrades (e.g. the old-system 15ms fallback), this assertion guards against regression.
         let b = unique_suffix();
-        assert_ne!(a, b, "连续两次调用必须返回不同后缀（否则 profile 撞名）");
+        assert_ne!(a, b, "two consecutive calls must return different suffixes (otherwise profiles collide)");
     }
 
     #[test]
     fn file_url_encodes_chinese_keeps_ascii() {
-        let p = std::path::PathBuf::from(r"C:\Users\张三\file.html");
+        let p = std::path::PathBuf::from("C:\\Users\\\u{5f20}\u{4e09}\\file.html");
         let url = file_url_from_path(&p);
-        assert!(url.starts_with("file:///C:/Users/"), "盘符/斜杠应保留: {}", url);
-        // "张三" UTF-8 = E5 BC A0 E4 B8 89
+        assert!(url.starts_with("file:///C:/Users/"), "drive/slashes should be kept: {}", url);
+        // the non-ASCII folder name in UTF-8 = E5 BC A0 E4 B8 89
         assert!(
             url.contains("%E5%BC%A0%E4%B8%89"),
-            "中文应被 percent-encode: {}",
+            "non-ASCII should be percent-encoded: {}",
             url
         );
-        assert!(url.ends_with("/file.html"), "纯 ASCII 文件名应原样: {}", url);
+        assert!(url.ends_with("/file.html"), "a pure ASCII file name should stay as is: {}", url);
     }
 
-    // ===== 以下移植自原 tests/logic.rs（镜像副本），改为直测产品函数，单一来源 =====
+    // ===== Ported from the old tests/logic.rs (mirrored copy), now testing the product functions directly, single source =====
     fn tempdir() -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
         let id = format!(
@@ -2145,7 +2316,7 @@ mod tests {
 
     #[test]
     fn ext_multi_dot_md_passes() {
-        // 仅看最后一段扩展名：tar.md / notes.md 合法
+        // only the last extension counts: tar.md / notes.md are valid
         assert!(has_allowed_ext("archive.tar.md"));
         assert!(has_allowed_ext("my.notes.md"));
     }
@@ -2192,26 +2363,26 @@ mod tests {
     fn save_atomic_no_bom_written() {
         let dir = tempdir();
         let p = dir.join("nobom.md");
-        save_file(p.to_str().unwrap().to_string(), "中文".into()).unwrap();
+        save_file(p.to_str().unwrap().to_string(), "\u{4e2d}\u{6587}".into()).unwrap();
         let bytes = fs::read(&p).unwrap();
-        assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "不应写 BOM");
+        assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "must not write a BOM");
     }
 
     #[test]
     fn save_refuses_empty_overwrite_nonempty() {
-        // P0-1：空内容不能覆盖非空文件
+        // P0-1: empty content must not overwrite a non-empty file
         let dir = tempdir();
         let p = dir.join("nonempty.md");
-        fs::write(&p, "有内容").unwrap();
+        fs::write(&p, "\u{6709}\u{5185}\u{5bb9}").unwrap();
         let err = save_file(p.to_str().unwrap().to_string(), "".into()).unwrap_err();
-        assert!(err.contains("拒绝写入空内容"), "实际错误: {err}");
-        assert_eq!(fs::read_to_string(&p).unwrap(), "有内容"); // 原文件未被破坏
+        assert!(err.contains("Refused to write empty content"), "actual error: {err}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "\u{6709}\u{5185}\u{5bb9}"); // the original file is intact
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn save_allows_empty_when_file_new() {
-        // 新文件（不存在）允许写空
+        // a new (non-existent) file may be written empty
         let dir = tempdir();
         let p = dir.join("new.md");
         save_file(p.to_str().unwrap().to_string(), "".into()).unwrap();
@@ -2223,10 +2394,10 @@ mod tests {
     fn open_utf8_no_bom() {
         let dir = tempdir();
         let p = dir.join("a.md");
-        fs::write(&p, "# 标题\n中文内容").unwrap();
+        fs::write(&p, "# \u{6807}\u{9898}\n\u{4e2d}\u{6587}\u{5185}\u{5bb9}").unwrap();
         let (c, enc) = open_file(p.to_str().unwrap().to_string()).unwrap();
         assert_eq!(enc, "UTF-8");
-        assert_eq!(c, "# 标题\n中文内容");
+        assert_eq!(c, "# \u{6807}\u{9898}\n\u{4e2d}\u{6587}\u{5185}\u{5bb9}");
     }
 
     #[test]
@@ -2234,22 +2405,22 @@ mod tests {
         let dir = tempdir();
         let p = dir.join("b.md");
         let mut bytes = vec![0xEF, 0xBB, 0xBF];
-        bytes.extend_from_slice("# 标题".as_bytes());
+        bytes.extend_from_slice("# \u{6807}\u{9898}".as_bytes());
         fs::write(&p, &bytes).unwrap();
         let (c, enc) = open_file(p.to_str().unwrap().to_string()).unwrap();
         assert_eq!(enc, "UTF-8(BOM)");
-        assert_eq!(c, "# 标题");
+        assert_eq!(c, "# \u{6807}\u{9898}");
     }
 
     #[test]
     fn open_gbk_fallback() {
         let dir = tempdir();
         let p = dir.join("g.md");
-        let (gbk, _, _) = encoding_rs::GBK.encode("中文");
+        let (gbk, _, _) = encoding_rs::GBK.encode("\u{4e2d}\u{6587}");
         fs::write(&p, &*gbk).unwrap();
         let (c, enc) = open_file(p.to_str().unwrap().to_string()).unwrap();
         assert_eq!(enc, "GBK");
-        assert_eq!(c, "中文");
+        assert_eq!(c, "\u{4e2d}\u{6587}");
     }
 
     #[test]
@@ -2262,37 +2433,37 @@ mod tests {
         assert_eq!(c, "");
     }
 
-    // T7 保存核心：save_file 写盘逻辑客观验证
+    // T7 core save: objective verification of save_file's disk write
     #[test]
     fn save_file_writes_utf8_no_bom_and_overwrites() {
         let dir = tempdir();
         let p = dir.join("s.md");
-        // 初次写中文内容（含编辑器产生的标记），读回应与写入完全一致
-        save_file(p.to_str().unwrap().to_string(), "# 标题\n正文 EDIT-789".to_string()).unwrap();
+        // first write of multi-byte content (with editor-generated markers); reading back must match exactly
+        save_file(p.to_str().unwrap().to_string(), "# \u{6807}\u{9898}\n\u{6b63}\u{6587} EDIT-789".to_string()).unwrap();
         let bytes = fs::read(&p).unwrap();
-        assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "必须 UTF-8 无 BOM");
-        assert_eq!(String::from_utf8(bytes).unwrap(), "# 标题\n正文 EDIT-789");
-        // 原子覆盖：旧内容被新内容完整替换
-        save_file(p.to_str().unwrap().to_string(), "新内容覆盖".to_string()).unwrap();
-        assert_eq!(fs::read_to_string(&p).unwrap(), "新内容覆盖");
-        // rename 成功后临时文件不应残留
-        assert!(!dir.join("s.md.tmp").exists(), "tmp 不应残留");
+        assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "must be UTF-8 without BOM");
+        assert_eq!(String::from_utf8(bytes).unwrap(), "# \u{6807}\u{9898}\n\u{6b63}\u{6587} EDIT-789");
+        // atomic overwrite: old content fully replaced by the new content
+        save_file(p.to_str().unwrap().to_string(), "\u{65b0}\u{5185}\u{5bb9}\u{8986}\u{76d6}".to_string()).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "\u{65b0}\u{5185}\u{5bb9}\u{8986}\u{76d6}");
+        // no temp file left after a successful rename
+        assert!(!dir.join("s.md.tmp").exists(), "tmp must not be left behind");
     }
 
     #[test]
     fn save_file_returns_fresh_meta() {
-        // v0.5.2 保存后误弹外改弹窗修复：save_file 返回句柄元数据（mtime/size），必须与
-        // 落盘后按路径读到的一致——前端直接以它为外改检测基准，错位即误弹/漏检
+        // v0.5.2 fix for the false external-change dialog after saving: save_file returns handle metadata (mtime/size), which must match
+        // what is read by path after the write — the frontend uses it directly as the external-change baseline; a mismatch means false alarms / missed changes
         let dir = tempdir();
         let p = dir.join("sm.md");
         let m1 = save_file(p.to_str().unwrap().to_string(), "v1".to_string()).unwrap();
-        assert_eq!(m1.size, 2, "size 应为写入字节数");
+        assert_eq!(m1.size, 2, "size should be the bytes written");
         let disk = file_meta(p.to_str().unwrap().to_string()).unwrap();
-        assert_eq!(disk.mtime_ms, m1.mtime_ms, "句柄元数据与路径读取的 mtime 应一致");
-        assert_eq!(disk.size, m1.size, "句柄元数据与路径读取的 size 应一致");
+        assert_eq!(disk.mtime_ms, m1.mtime_ms, "handle metadata and path-read mtime should match");
+        assert_eq!(disk.size, m1.size, "handle metadata and path-read size should match");
         std::thread::sleep(std::time::Duration::from_millis(20));
         let m2 = save_file(p.to_str().unwrap().to_string(), "v2-longer".to_string()).unwrap();
-        assert!(m2.mtime_ms >= m1.mtime_ms, "mtime 不应倒退");
+        assert!(m2.mtime_ms >= m1.mtime_ms, "mtime must not go backwards");
         assert_eq!(m2.size, 9);
     }
 
@@ -2300,11 +2471,11 @@ mod tests {
     fn save_file_rejects_empty_overwrite_of_nonempty() {
         let dir = tempdir();
         let p = dir.join("guard.md");
-        fs::write(&p, "已有内容").unwrap();
+        fs::write(&p, "\u{5df2}\u{6709}\u{5185}\u{5bb9}").unwrap();
         let err = save_file(p.to_str().unwrap().to_string(), "".to_string()).unwrap_err();
-        assert!(err.contains("空内容"), "空写防护应拦截，实际 err={err}");
-        // 原文件未被清零
-        assert_eq!(fs::read_to_string(&p).unwrap(), "已有内容");
+        assert!(err.contains("empty content"), "the empty-write guard should block it, err={err}");
+        // the original file was not wiped
+        assert_eq!(fs::read_to_string(&p).unwrap(), "\u{5df2}\u{6709}\u{5185}\u{5bb9}");
     }
 
     #[test]
@@ -2312,19 +2483,19 @@ mod tests {
         let dir = tempdir();
         let p = dir.join("a.docx");
         let err = save_file(p.to_str().unwrap().to_string(), "x".to_string()).unwrap_err();
-        assert!(err.contains("不支持"), "非白名单扩展名应拒绝，实际 err={err}");
+        assert!(err.contains("Unsupported"), "non-whitelisted extensions should be refused, err={err}");
     }
 
-    // ===== v0.3.11 版本历史 =====
+    // ===== v0.3.11 version history =====
     #[test]
     fn read_version_rejects_path_escape() {
         let err = read_version("C:\\Windows\\win.ini".to_string()).unwrap_err();
-        assert!(err.contains("非法"), "目录穿越应拒绝，实际 err={err}");
+        assert!(err.contains("Invalid"), "directory traversal should be refused, err={err}");
     }
 
     #[test]
     fn archive_skips_temp_paths() {
-        // tempdir 夹具：不归档不崩溃（隔离验证，真实归档由 release e2e 覆盖）
+        // tempdir fixture: no archiving, no crash (isolation check; real archiving is covered by release e2e)
         let dir = tempdir();
         let p = dir.join("t.md");
         fs::write(&p, "v1").unwrap();
@@ -2335,21 +2506,21 @@ mod tests {
 
     #[test]
     fn version_stem_sanitizes_and_disambiguates() {
-        let a = version_stem("C:\\docs\\报告 一.md");
-        let b = version_stem("C:\\docs\\报告一.md");
-        assert!(a.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.'), "非法字符应被替换: {a}");
-        assert_ne!(a, b, "同名不同路径应消歧");
+        let a = version_stem("C:\\docs\\\u{62a5}\u{544a} \u{4e00}.md");
+        let b = version_stem("C:\\docs\\\u{62a5}\u{544a}\u{4e00}.md");
+        assert!(a.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.'), "illegal characters should be replaced: {a}");
+        assert_ne!(a, b, "same name in different paths should be disambiguated");
     }
 
-    // ===== PDF 分流相关测试（find_pdf_source 各分支 / open_pdf_external reject）=====
+    // ===== PDF routing tests (find_pdf_source branches / open_pdf_external reject) =====
     #[test]
     fn find_pdf_source_finds_md() {
         let dir = tempdir();
         fs::write(dir.join("report.pdf"), "%PDF-fake").unwrap();
-        fs::write(dir.join("report.md"), "# 源").unwrap();
+        fs::write(dir.join("report.md"), "# source").unwrap();
         let pdf = dir.join("report.pdf").to_str().unwrap().to_string();
-        let got = find_pdf_source(pdf).expect("应找到 report.md");
-        assert!(got.ends_with("report.md"), "实际: {}", got);
+        let got = find_pdf_source(pdf).expect("should find report.md");
+        assert!(got.ends_with("report.md"), "got: {}", got);
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
@@ -2358,7 +2529,7 @@ mod tests {
         fs::write(dir.join("doc.pdf"), "%PDF").unwrap();
         fs::write(dir.join("doc.html"), "<html/>").unwrap();
         let got = find_pdf_source(dir.join("doc.pdf").to_str().unwrap().to_string()).unwrap();
-        assert!(got.ends_with("doc.html"), "实际: {}", got);
+        assert!(got.ends_with("doc.html"), "got: {}", got);
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
@@ -2375,7 +2546,7 @@ mod tests {
         fs::write(dir.join("x.md"), "md").unwrap();
         fs::write(dir.join("x.html"), "html").unwrap();
         let got = find_pdf_source(dir.join("x.pdf").to_str().unwrap().to_string()).unwrap();
-        assert!(got.ends_with("x.md"), "md 应优先于 html，实际: {}", got);
+        assert!(got.ends_with("x.md"), "md should win over html, got: {}", got);
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
@@ -2384,7 +2555,7 @@ mod tests {
         let p = dir.join("a.txt");
         fs::write(&p, "x").unwrap();
         let err = open_pdf_external(p.to_str().unwrap().to_string()).unwrap_err();
-        assert!(err.contains("仅支持打开 .pdf"), "实际 err: {}", err);
+        assert!(err.contains("Only .pdf files"), "err: {}", err);
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
@@ -2392,28 +2563,28 @@ mod tests {
         let dir = tempdir();
         let p = dir.join("nope.pdf");
         let err = open_pdf_external(p.to_str().unwrap().to_string()).unwrap_err();
-        assert!(err.contains("文件不存在"), "不存在的 pdf 应在探测前返回，实际 err: {}", err);
+        assert!(err.contains("File does not exist"), "a missing pdf should return before probing, err: {}", err);
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
     fn locate_pdf4qt_finds_installed_on_this_machine() {
-        // 本机验证：PDF4QT 便携版 v1.6 装在 F:\software\PDF4QT，locate_pdf4qt 应找到 Pdf4QtEditor.exe。
-        // 非本机环境（CI/其他机器未装）跳过而非失败。
+        // Local check: PDF4QT portable v1.6 is installed at F:\software\PDF4QT, locate_pdf4qt should find Pdf4QtEditor.exe.
+        // On other machines (CI / not installed) it is skipped rather than failed.
         let expected = PathBuf::from("F:\\software\\PDF4QT\\Pdf4QtEditor.exe");
         if !expected.is_file() {
             return;
         }
         let got = locate_pdf4qt();
-        assert_eq!(got, Some(expected), "应探测到 F:\\software\\PDF4QT\\Pdf4QtEditor.exe，实际: {:?}", got);
+        assert_eq!(got, Some(expected), "should detect F:\\software\\PDF4QT\\Pdf4QtEditor.exe, got: {:?}", got);
     }
 
-    // ===== v0.4.0 自定义主题（list_theme_files/read_theme_css 的文件系统逻辑） =====
-    // AppHandle 无法在单测构造，直接测其依赖的目录行为：用独立目录+同名逻辑复刻太脆，
-    // 改为抽取核心规则在这两个测试里验证——_ 前缀禁用 / 非 .css 忽略 / 防穿越字符集。
-    // （list/read 的 AppHandle 胶水层由部署 exe 的 e2e 全链覆盖）
+    // ===== v0.4.0 custom themes (file-system logic of list_theme_files/read_theme_css) =====
+    // AppHandle cannot be built in unit tests, so test the folder behaviour it relies on: replicating with a separate folder + same logic is too brittle,
+    // so the core rules are extracted and verified in these two tests — _ prefix disables / non-.css ignored / traversal character set.
+    // (the AppHandle glue of list/read is covered end to end by e2e on the deployed exe)
     #[test]
     fn theme_name_validation_rules() {
-        // read_theme_css 拒绝的形态（与命令内联校验同一规则集，规则漂移时此测试提醒同步）
+        // shapes read_theme_css refuses (same rule set as the inline command check; this test flags drift)
         let bad = ["", "a/b", "a\\b", "a..b", "c:d"];
         for n in bad {
             let invalid = n.is_empty()
@@ -2421,21 +2592,21 @@ mod tests {
                 || n.contains('\\')
                 || n.contains("..")
                 || n.contains(':');
-            assert!(invalid, "应拒绝: {n:?}");
+            assert!(invalid, "should refuse: {n:?}");
         }
-        let ok = ["drake", "drake-dark", "我的主题", "vue_2026"];
+        let ok = ["drake", "drake-dark", "\u{6211}\u{7684}\u{4e3b}\u{9898}", "vue_2026"];
         for n in ok {
             let invalid = n.is_empty()
                 || n.contains('/')
                 || n.contains('\\')
                 || n.contains("..")
                 || n.contains(':');
-            assert!(!invalid, "应放行: {n:?}");
+            assert!(!invalid, "should allow: {n:?}");
         }
     }
     #[test]
     fn theme_stem_underscore_prefix_means_disabled() {
-        // list_theme_files 的收录口径：.css（大小写不敏感）且 stem 不以 _ 开头（与实现同用 std path API）
+        // list_theme_files inclusion rule: .css (case-insensitive) and the stem does not start with _ (same std path API as the implementation)
         let names = [("drake.css", true), ("_example.css", false), ("a.CSS", true), ("a.txt", false), ("_x.CSS", false)];
         for (fname, expect) in names {
             let ext_ok = fname.to_ascii_lowercase().ends_with(".css");
@@ -2447,13 +2618,13 @@ mod tests {
 
     #[test]
     fn open_dropped_pdf_rejects_non_pdf_and_writes_temp_for_sentinel() {
-        // 非 pdf 拒绝（不写文件）
+        // non-pdf refused (no file written)
         assert!(open_dropped_pdf(vec![b'%', b'P', b'D', b'F'], "a.txt".into()).is_err());
-        // 哨兵 pdf：写临时文件 + 内容正确 + 不拉起 PDF4QT（Ok）
+        // sentinel pdf: temp file written + correct content + PDF4QT not launched (Ok)
         let r = open_dropped_pdf(vec![0x25, 0x50, 0x44, 0x46], "__dnd_selftest__.pdf".into());
-        assert!(r.is_ok(), "哨兵 pdf 应写临时并 Ok，实际: {:?}", r);
-        let tmp = std::env::temp_dir().join("md-editor-drag").join("__dnd_selftest__.pdf");
-        assert!(tmp.is_file(), "临时文件应存在: {:?}", tmp);
-        assert_eq!(fs::read(&tmp).unwrap(), vec![0x25, 0x50, 0x44, 0x46], "临时文件内容应一致");
+        assert!(r.is_ok(), "sentinel pdf should be written to temp and return Ok, got: {:?}", r);
+        let tmp = std::env::temp_dir().join("mdaddy-drag").join("__dnd_selftest__.pdf");
+        assert!(tmp.is_file(), "temp file should exist: {:?}", tmp);
+        assert_eq!(fs::read(&tmp).unwrap(), vec![0x25, 0x50, 0x44, 0x46], "temp file content should match");
     }
 }

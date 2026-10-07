@@ -1,169 +1,182 @@
-# MD 编辑器 · md-editor — 项目规则
+# Mdaddy (md-editor) — Project rules
 
-> 轻量 Windows 桌面 Markdown 编辑器：Tauri 2 + Vditor，所见即所得 + 表格可视化编辑，单文件便携 exe（约 15MB），无联网上报。
-> 本文件只写本项目独有规则；通用规则见全局 CLAUDE.md。
+> Lightweight Windows desktop Markdown editor: Tauri 2 + Vditor, WYSIWYG + visual table editing, single portable exe, no telemetry.
+> This file only covers rules specific to this project; general rules live in the global CLAUDE.md.
 
-## 1. 项目定位
+## 1. Project scope
 
-- **解决什么**：本地 MD 编辑（表格可视化/多标签/五主题/全盘文件名搜索/多格式导出），单 exe 零依赖分发。
-- **当前状态**：交付并持续迭代（v0.3.26，2026-09-08）。
-- **不做什么**：不做云同步/账号/联网协作；不做所见即所得模式下相对路径图片缩略图（保源码可移植性，导出时才嵌入——已知取舍）。
+- **What it solves**: local Markdown editing (visual tables / tabs / themes / drive-wide file-name search / multi-format export), distributed as a single zero-dependency exe.
+- **Current state**: v0.6.0 — English-only, own app identity (`com.ninjakristo.mdaddy`, process `mdaddy.exe`, data in `%APPDATA%\Mdaddy`), so it runs alongside the old md-editor.
+- **v0.6.0 modules**: `src/commands.ts` (every command + rebindable shortcut, capture listener registered before Vditor) · `src/tooltip.ts` (app-wide hover tips with italic shortcut) · `src/settings.ts` (⚙ settings + welcome screen) · `src/ai.ts` (AI panel: Ollama / shelf HF·Unsloth·freetoken via OpenAI-compatible server / Claude Pro via `claude -p` / ChatGPT Plus via `codex exec`) · `src/send.ts` (Send to Obsidian / VS Code / Firefox / custom) · `src-tauri/src/extras.rs` (local-only HTTP, CLI runner, shelf scan, known folders, launch_app).
+- **Vditor runtime assets** (`public/vditor-assets`, gitignored) are copied by `scripts/copy-vditor-assets.mjs` on every dev/build — if they are missing the editor never starts (no toolbar, files don't open).
+- **Out of scope**: no cloud sync / accounts / online collaboration; no thumbnails for relative-path images in WYSIWYG mode (keeps the source portable; images are embedded only on export — a known trade-off).
+- **No Asian characters anywhere in the repo or the build.** Source, comments, docs, tests and the bundled output must stay free of CJK characters. `scripts/strip-cjk.ts` (Vite plugin) translates/escapes the CJK text shipped inside third-party libraries at build time — keep it in `vite.config.ts`.
 
-## 2. 架构与目录
+## 2. Architecture and layout
 
-| 项 | 内容 |
+| Item | Content |
 |---|---|
-| 技术栈 | Tauri 2（Rust）· TypeScript + Vite · Vditor 3（编辑核心）· markdown-it（导出渲染）|
-| 前端 | `src/main.ts`（主逻辑大文件：撤销栈/标签页/文件树/导出/全盘索引）· `i18n-zh-CN|zh-TW|en.ts` · `styles.css` · `index.html` |
-| 后端 | `src-tauri/src/lib.rs` + `main.rs`（Rust 命令：文件 IO/编码识别/全盘索引/单实例转发） |
-| 测试 | `tests/TEST-PLAN.md`（唯一入口：五层体系 + 模块→组映射 + 盲区对策）；脚本在 `output/md-editor-typora-scan/`（e2e_user_J_v0321.py · ahk_smoke_v1.ahk）+ `output/md-editor-largefile-v0325/`（e2e_user_L_v0325.py 大文件专项 + headless 基准脚本） |
-| 版本 | package.json 0.1.0（未跟随）；实际版本看 git tag/README（v0.3.26）【版本唯一真值源待确认】 |
+| Stack | Tauri 2 (Rust) · TypeScript + Vite · Vditor 3 (editor core) · markdown-it (export rendering) |
+| Frontend | `src/main.ts` (main logic: undo stack / tabs / file tree / export / drive index) · `i18n-en.ts` · `styles.css` · `index.html` |
+| Backend | `src-tauri/src/lib.rs` + `main.rs` (Rust commands: file IO / encoding detection / drive index / single-instance forwarding) |
+| Tests | `tests/TEST-PLAN.md` (single entry point: five layers + module → group map + blind-spot countermeasures); scripts in `output/md-editor-typora-scan/` (e2e_user_J_v0321.py · ahk_smoke_v1.ahk) + `output/md-editor-largefile-v0325/` (e2e_user_L_v0325.py large-file suite + headless benchmarks) |
+| Version | package.json 0.1.0 (not tracked); the real version is in tauri.conf.json / git tag |
+| Icon | `src-tauri/icons/icon.ico` = `.vscode/Mdaddy.ico`; PNG sizes generated with `npx tauri icon` |
 
-**启动链路**：`npm run dev`（Vite）→ `npm run tauri dev`；生产：见下方部署链。
+**Startup chain**: `npm run dev` (Vite) → `npm run tauri dev`; production: see the deploy chain below.
 
-### 五层测试体系（tests/TEST-PLAN.md 是唯一入口，改前必查）
+### Five-layer test system (tests/TEST-PLAN.md is the single entry point, check before changing anything)
 
-| 层 | 内容 | 触发时机 | 耗时 |
+| Layer | Content | When | Time |
 |---|---|---|---|
-| L0 | `cd src-tauri && cargo test`（49 用例） | 每次改 Rust | ~10s |
-| L1 | 冒烟：e2e_user_J_v0321.py（18 断言）+ ahk_smoke_v26.ahk（7 断言） | 每次交付/部署 | ~3min |
-| L2 | 专项回归：按「模块→组映射」跑受影响组 | 改动对应模块 | ~1min/组 |
-| L3 | 全量：B/C/D/E/F/G/H/I/J + e2e_fullcheck | 发版前 | ~15min |
-| L4 | AHK 真实键鼠（OS 级，走真实副作用不注入 JS） | 发版前（需桌面在线） | ~2min |
+| L0 | `cd src-tauri && cargo test` (54 cases) | every Rust change | ~10s |
+| L1 | Smoke: e2e_user_J_v0321.py (18 assertions) + ahk_smoke_v26.ahk (7 assertions) | every delivery/deploy | ~3min |
+| L2 | Targeted regression: run affected groups per the module → group map | when a mapped module changes | ~1min/group |
+| L3 | Full: B/C/D/E/F/G/H/I/J + e2e_fullcheck | before release | ~15min |
+| L4 | AHK real keyboard/mouse (OS level, real side effects, no JS injection) | before release (desktop must be online) | ~2min |
 
-### 模块→组映射（改哪个模块跑哪组）
+Note: older e2e/AHK scripts match Chinese UI text; after the English-only change they must be updated to the English strings before they are trusted again.
 
-| 改动模块 | 必跑 |
+### Module → group map (which group to run for which module)
+
+| Changed module | Must run |
 |---|---|
-| 撤销/保存/自动保存（main.ts snap*/saveDoc/autosaveDirty） | B、fullcheck(A11)、AHK |
-| 大文档延迟取值（valueSync*/openDoc 上限/switchDoc 装载） | L、B、AHK |
-| 标签页（renderTabs/多选/溢出） | B、J |
-| 会话持久化/惰性恢复/外改检测/状态栏/查找历史（v0.3.26 saveSession·loadLazyDoc·checkExternalMod·trackSelectionStatus·findHist*） | M、fullcheck、B |
-| 文件树/全盘搜索/定位 | E、H、I、J |
-| 主题/样式（styles.css/applyTheme） | D、J |
-| 导出/打印 | fullcheck(E)、C |
-| lib.rs（Rust 命令） | cargo test + 相关组 |
+| Undo/save/autosave (main.ts snap*/saveDoc/autosaveDirty) | B, fullcheck(A11), AHK |
+| Large-document deferred value sync (valueSync*/openDoc limits/switchDoc loading) | L, B, AHK |
+| Tabs (renderTabs/multi-select/overflow) | B, J |
+| Session persistence / lazy restore / external-change detection / status bar / find history (v0.3.26 saveSession · loadLazyDoc · checkExternalMod · trackSelectionStatus · findHist*) | M, fullcheck, B |
+| File tree / drive search / locate | E, H, I, J |
+| Themes/styles (styles.css/applyTheme) | D, J |
+| Export/print | fullcheck(E), C |
+| lib.rs (Rust commands) | cargo test + related groups |
 
-M 组脚本：`output/md-editor-session-v0326/`（e2e_user_M_v0326.py M1-13 + m_big_ws.py/m_ir2.py M14-18；**禁 playwright connect_over_cdp**——对部署 WebView 偶发握手后挂死，一律纯 CDP websocket + suppress_origin=True）。fullcheck 三处历史漂移（2026-09-08 定性，非产品问题）：A1/B2=v0.3.26 带参启动不再开欢迎页+会话不含欢迎页（预期变更）；D2=脚本打字-点✕时序漂移（产品弹窗独立验证正常）。
+Group M scripts: `output/md-editor-session-v0326/` (e2e_user_M_v0326.py M1-13 + m_big_ws.py/m_ir2.py M14-18; **never use playwright connect_over_cdp** — it occasionally hangs after the handshake against the deployed WebView; always use raw CDP websocket + suppress_origin=True). Three historical fullcheck drifts (classified 2026-09-08, not product bugs): A1/B2 = since v0.3.26 launching with an argument no longer opens the welcome page and the session excludes it (expected change); D2 = script typing vs. clicking ✕ timing drift (the product dialog verified fine independently).
 
-### AHK 外测铁律（历史实测教训，逐条有效）
+### AHK external testing rules (each one learned the hard way)
 
-- 脚本编码必须 **UTF-8 带 BOM**（无 BOM 按 ANSI 读，中文断言字面量全废=假 FAIL）。
-- 键入一律**纯数字**（字母序列会被拼音 IME 组合成中文）。
-- 前置：RDP 输入通道在线——会话"运行中"≠通道通；键入零进入+文件纯基线=通道断，等桌面真正活跃。
-- 另存对话框路径用**剪贴板粘贴**（Send 打路径被 IME/焦点层吞）。
-- 失焦用 `WinActivate ahk_class Progman`；窗口位置每轮漂移，坐标断言只用相对客户区。
-- 脚本+日志放 **C 盘 Temp** 且 TEMP/TMP 指回 C 盘跑（2026-09-07 实锤：AHK 写 F 盘整脚本挂死零输出）；ExitApp-only 最小脚本可区分解释器挂 vs IO 挂。
-- **用户在场=实时键鼠干扰源**（2026-09-08 实锤：首跑 4/7，三项键入零进正文——长 Sleep 空窗里用户切窗口，点击落别处；有 WinWaitActive 保护的 AHK5 独过=反证）：每个键入断言前一律 `WinActivate + WinWaitActive` 重锁前台，键入后顺手 Log WinActive 诊断位；"键入零进+文件纯基线"先怀疑干扰再怀疑产品。
-- 对照旧版 exe 测试后必查 `tasklist | grep md-editor` 反向清点：改名副本（如 .prev0）进程名跟文件名走，`taskkill /IM md-editor.exe` 杀不到 → 单实例转发黑洞吞掉后续所有启动，极易误诊为产品回归。
-- 7 断言：键入+^S / ^Z 一步撤销 / ^Y 重做 / 失焦自动保存 / 双击标签新建+另存 / 干净退出 / 退出后会话落盘（AHK7，v0.3.26）。
-- 页面诊断钩子（只读）：`window.__mdUndo/__mdRedo/__mdDocs/__sLog/__zTrace`。
+- Script encoding must be **UTF-8 with BOM** (without BOM it is read as ANSI and non-ASCII assertion literals break = false FAIL).
+- Always type **digits only** (letter sequences get composed by a pinyin IME).
+- Prerequisite: RDP input channel online — session "running" ≠ channel connected; zero characters typed + file at pure baseline = channel down, wait until the desktop is truly active.
+- Enter Save As dialog paths by **clipboard paste** (typing the path with Send is swallowed by the IME/focus layer).
+- Blur with `WinActivate ahk_class Progman`; window position drifts each run, so coordinate assertions only use client-relative maths.
+- Put scripts + logs in **C: Temp** and point TEMP/TMP back to drive C (confirmed 2026-09-07: AHK writing to drive F hung the whole script with zero output); an ExitApp-only minimal script tells an interpreter hang from an IO hang.
+- **A user at the machine = live keyboard/mouse interference** (confirmed 2026-09-08: first run 4/7, three typing checks put nothing in the document — the user switched windows during long Sleep gaps and clicks landed elsewhere; AHK5, protected by WinWaitActive, passed alone = counter-proof): before every typing assertion always `WinActivate + WinWaitActive` to relock the foreground, and log WinActive after typing; for "nothing typed + file at baseline" suspect interference before the product.
+- After testing against an old exe, always check `tasklist | grep md-editor`: a renamed copy (e.g. .prev0) gets a process name that follows the file name, `taskkill /IM md-editor.exe` misses it → the single-instance forwarding black hole swallows every later launch, easily misdiagnosed as a product regression.
+- 7 assertions: type + ^S / ^Z one-step undo / ^Y redo / autosave on blur / double-click tab bar new + Save As / clean exit / session written after exit (AHK7, v0.3.26).
+- Page diagnostic hooks (read-only): `window.__mdUndo/__mdRedo/__mdDocs/__sLog/__zTrace`.
 
-**不可轻易改动的边界（高风险交互区）**：
-- **撤销/重做**：自建多步栈（100 步/文档）+ Vditor 自有栈双通道；分步 = 600ms 停顿 + 8 字双阈值，信号源**必须挂原生 input 事件**（`options.input` 被 afterRender 合并，连打整段只发一次——c13db25 根修）；Vditor `resetIcon` 会按其自身栈抢设按钮态（已猴补 no-op）；Backspace/Delete 不触发 input，需 keydown 距上次 >400ms 封口 + keyup 80ms 兜底。
-- **IME 组合态**：拼音组合中 Ctrl+Z 先结束组合再回退；AHK 键入一律纯数字（字母会被拼音 IME 组合成中文）。
-- **Vditor 热键抢占**：Vditor 元素层拦截合成 KeyboardEvent——带修饰键的真键盘行为只能在 AHK 层验证。
-- **blur 保存时序**：失焦自动保存取值有异步竞争，改动保存链路必跑 B 组 + fullcheck(A11)。
-- 大文件防线（v0.3.25 重设：>200 万字符拒开 / >262144 字符进大文档延迟取值通道；Rust 16MB 硬上限）、编码识别（UTF-8/BOM/GBK，保存统一 UTF-8 无 BOM）。
-- **已知边界·单巨段落大文档**（2026-09-08 定界，v0.3.25 同症=Vditor 引擎存量问题，非 v0.3.26 回归）：md 源无空行分段（单行巨文或连续换行软折行皆算）且 10 万字符级以上，wysiwyg 装载后 JS 主线程长时间同步阻塞（evaluate/输入全超时、CPU 静止、非 JS 命令正常）。空行分段同体量（27 万）正常、诛仙合册 57 万（天然分段）正常。勿按"字符数"单指标判断大文档性能，段落结构才是关键变量。
-- **v0.3.26 会话结构**：ui-state.json `session:{v:1,tabs:[{p,n,s,m,z}],a}`（路径/名/scrollTop/mtime/size/active）；恢复标签全部 lazy 构造，活动标签 await loadLazyDoc（open_file 后 lazy=false）——**不能直接给活动标签 lazy:false**（loadLazyDoc 前置 `!doc.lazy` 即 return，永远空内容）。装载窗口期防串守卫（lazy/loading 检查）在 options.input/原生 input/flushValueSync/autosaveDirty 四处，改装载链路勿删。
+**Boundaries not to change lightly (high-risk interaction areas)**:
+- **Undo/redo**: custom multi-step stack (100 steps/document) + Vditor's own stack, dual channel; steps split on a 600ms pause + 8-character dual threshold; the signal source **must hook the native input event** (`options.input` is merged by afterRender, typing a whole paragraph fires only once — root fix c13db25); Vditor `resetIcon` overrides button state from its own stack (monkey-patched to a no-op); Backspace/Delete do not fire input, so keydown >400ms since the last one seals the step + keyup 80ms fallback.
+- **IME composition**: Ctrl+Z during pinyin composition ends the composition first, then undoes; AHK always types digits only.
+- **Vditor hotkey pre-emption**: the Vditor element layer intercepts synthetic KeyboardEvents — real keyboard behaviour with modifiers can only be verified at the AHK layer.
+- **Blur save timing**: the autosave-on-blur value read has an async race; changes to the save chain must run group B + fullcheck(A11).
+- Large-file defences (reset in v0.3.25: >2,000,000 characters refused / >262,144 characters use the large-document deferred value channel; Rust 16MB hard limit), encoding detection (UTF-8/BOM/GBK, always saved as UTF-8 without BOM).
+- **Known limit · huge single-paragraph documents** (scoped 2026-09-08, same symptom in v0.3.25 = existing Vditor engine issue, not a v0.3.26 regression): when the Markdown source has no blank-line paragraph breaks (one giant line or soft-wrapped consecutive lines) and is 100k+ characters, the JS main thread blocks for a long time after WYSIWYG load (evaluate/input all time out, CPU idle, non-JS commands fine). The same size split by blank lines (270k) is fine, and a 570k-character novel compilation (naturally paragraphed) is fine. Do not judge large-document performance by character count alone; paragraph structure is the key variable.
+- **v0.3.26 session structure**: ui-state.json `session:{v:1,tabs:[{p,n,s,m,z}],a}` (path/name/scrollTop/mtime/size/active); restored tabs are all built lazy, the active tab awaits loadLazyDoc (lazy=false after open_file) — **never give the active tab lazy:false directly** (loadLazyDoc returns early on `!doc.lazy`, leaving the content empty forever). Guards against cross-document leaks during loading (lazy/loading checks) live in options.input / native input / flushValueSync / autosaveDirty; do not remove them when changing the loading chain.
 
-## 3. 常用命令
+## 3. Common commands
 
 ```bash
+# Full release build (frontend THEN exe, copies to release/Mdaddy.exe). Never cargo-build without npm run build first.
+bash scripts/build-release.sh
 
-npm run dev                     # Vite 前端开发
-npm run tauri dev               # 桌面壳开发
-npm run build                   # tsc && vite build（改 TS 后必跑，类型错误即失败）
+# In-repo e2e against the real exe (isolated portable copy, never touches the real profile)
+cd tests/e2e && python smoke.py && python features.py   # features.py needs Ollama running + claude CLI signed in
 
-# L0 Rust 测试（改 Rust 必跑，~10s）
+npm run dev                     # Vite frontend dev
+npm run tauri dev               # desktop shell dev
+npm run build                   # tsc && vite build (run after any TS change; type errors fail the build)
+
+# L0 Rust tests (run after any Rust change, ~10s)
 cd src-tauri && cargo test
 
-# L1 冒烟（交付前，~3min；脚本在 output/md-editor-typora-scan/）
-python e2e_user_J_v0321.py                              # 18 断言
-"/c/Program Files/AutoHotkey/v2/AutoHotkey64.exe" ahk_smoke_v26.ahk  # 7 断言，需桌面在线（脚本放 C 盘 Temp 跑）
+# L1 smoke (before delivery, ~3min; scripts in output/md-editor-typora-scan/)
+python e2e_user_J_v0321.py                              # 18 assertions
+"/c/Program Files/AutoHotkey/v2/AutoHotkey64.exe" ahk_smoke_v26.ahk  # 7 assertions, desktop must be online (run the script from C: Temp)
 
-# 生产部署链
+# Production build chain
 npm run build && cd src-tauri && cargo build --release --bins --features tauri/custom-protocol
-# → cp 到 F:\software（md5 比对确认）
+# → release exe: src-tauri/target/release/md-editor.exe (copy to release/Mdaddy.exe, md5 compare)
 ```
 
-- AHK 前置：RDP 输入通道在线（会话"运行中"≠通道通；键入零进入=通道断，等桌面真正活跃）；脚本必须 UTF-8 **带 BOM**。
+- cargo lives in `~/.cargo/bin` (not on the Bash PATH by default: `export PATH="$HOME/.cargo/bin:$PATH"`).
+- `npm install` needs `--allow-remote=all` (the lockfile points at registry.npmmirror.com tarballs).
+- AHK prerequisite: RDP input channel online (session "running" ≠ channel connected; zero characters typed = channel down, wait for an active desktop); scripts must be UTF-8 **with BOM**.
 
-## 4. 开发约束
+## 4. Development constraints
 
-- **改前必做**：查 `tests/TEST-PLAN.md` 「模块→组映射」表，确认改动模块对应哪些测试组。
-- **新功能必须同步**：最新组（当前 J）加断言或开新组；断言必须硬校验（文件内容/DOM 几何/进程状态），禁止只查元素存在；改键盘交互必须过 AHK。
-- **谨慎修改**：`main.ts` snap*/saveDoc/autosaveDirty（撤销+保存链）· Vditor 实例化 options · `lib.rs` 文件 IO 命令。
-- **提交前最小检查**：`npm run build` 零类型错误 · 受影响测试组绿 · 改 Rust 则 cargo test 49 用例绿 · README 版本号与功能描述同步。
-- fullcheck 等长脚本的元素引用随版本更新（教训：#file-title v0.3.16 撤掉，脚本没跟，D4a 假阴两版）。
+- **Before changing anything**: check the module → group map in `tests/TEST-PLAN.md` to see which test groups the change affects.
+- **New features must be covered**: add assertions to the latest group (currently J) or open a new group; assertions must be hard checks (file content / DOM geometry / process state), never just "element exists"; keyboard interaction changes must pass AHK.
+- **Change with care**: `main.ts` snap*/saveDoc/autosaveDirty (undo + save chain) · Vditor instantiation options · `lib.rs` file IO commands.
+- **Minimum checks before committing**: `npm run build` with zero type errors · affected test groups green · Rust changes: cargo test all green · README kept in sync · no CJK characters anywhere (repo and `dist/`).
+- Element references in long scripts like fullcheck must follow version changes (lesson: #file-title was removed in v0.3.16, the script did not follow, D4a gave false negatives for two versions).
 
-## 5. 验收标准
+## 5. Acceptance criteria
 
-| 项 | 硬指标 |
+| Item | Hard requirement |
 |---|---|
-| Rust | cargo test 49 用例全绿 |
-| 冒烟 | e2e_user_J 18 断言全过 + AHK 7 断言全过（真键鼠、真实副作用） |
-| 撤销语义 | 连打一段→撤销按小段回退（非整段飞回）；IME 组合中 Ctrl+Z 不破坏文本；全替/表格批量操作一步一撤销 |
-| 保存 | Ctrl+S / 失焦 / 30s 自动三种路径落盘内容一致；版本历史归档生效（50 版/30 天） |
-| 导出 | PDF 文本可选中可搜索；docx 表格/脚注/图片真嵌入；相对路径图片导出时嵌入 |
-| 分发 | 单 exe（~15MB）干净可用；F:\software 副本 md5 与构建产物一致 |
+| Rust | cargo test all green |
+| Smoke | e2e_user_J 18 assertions + AHK 7 assertions all pass (real keyboard/mouse, real side effects) |
+| Undo semantics | type a paragraph → undo steps back in small chunks (not the whole paragraph at once); Ctrl+Z during IME composition does not corrupt text; replace-all / table batch operations undo in one step |
+| Save | Ctrl+S / blur / 30s autosave write identical content; version history archiving works (50 versions / 30 days) |
+| Export | PDF text selectable and searchable; docx tables/footnotes/images truly embedded; relative-path images embedded on export |
+| Distribution | single exe runs clean; release copy md5 matches the build output |
 
-## 6. 安全与风险
+## 6. Security and risk
 
-- **隐私**：无联网上报；全盘索引只建文件名/路径，不进内容——新增任何索引/日志功能不得把文档内容写出 exe 目录外。
-- **运行日志**（v0.3.23 起）：512KB 滚动留三代；诊断包导出只含系统信息+日志，**不得含文档内容**。
-- **须人工确认（R3）**：对外发布/GitHub 推送 · 删除版本历史归档 · 改变保存编码策略（统一 UTF-8 无 BOM 是既定行为）。
-- **禁止**：绕过大文件防线（v0.3.25 起=前端 200 万字符 + Rust 16MB + 大文档延迟取值通道，实测依据见 output/md-editor-largefile-v0325/，勿在无新基准下放宽或收紧）· 在 Vditor options.input 上挂撤销分步信号（已被证实失效）· AHK 脚本去 BOM。
-- 本地多版未推 GitHub——**推送前须人工过一遍提交序列与敏感信息**。
+- **Privacy**: no telemetry; the drive index stores only file names/paths, never content — any new index/log feature must not write document content outside the exe folder.
+- **Run log** (since v0.3.23): 512KB rolling, three generations kept; the diagnostics bundle contains only system info + logs, **never document content**.
+- **Needs human confirmation (R3)**: public releases / GitHub pushes · deleting version-history archives · changing the save encoding policy (always UTF-8 without BOM is established behaviour).
+- **Forbidden**: bypassing the large-file defences (since v0.3.25 = frontend 2,000,000 characters + Rust 16MB + large-document deferred channel; benchmarks in output/md-editor-largefile-v0325/, do not loosen or tighten without new benchmarks) · hooking the undo step signal on Vditor options.input (proven not to work) · removing the BOM from AHK scripts.
+- Several local versions are not pushed to GitHub — **review the commit sequence and sensitive data by hand before pushing**.
 
-## 7. 当前重点与待办
+## 7. Current focus and to-dos
 
-### 已知测试盲区对策（历史教训，改测试时必看）
+### Known test blind spots (lessons learned, read before changing tests)
 
-| 盲区 | 对策 |
+| Blind spot | Countermeasure |
 |---|---|
-| CDP 带修饰键字母丢键（z 丢、s 能到） | 真键盘行为只在 AHK 层验证 |
-| 合成事件被 Vditor 元素层拦截 | 产品暴露 __md* 只读测试钩子绕过 |
-| 中文 SendText 后 isComposing 残留 | AHK 键入一律英文/纯数字 + SetEng() |
-| 长脚本元素引用过期（#file-title 教训） | fullcheck 引用随版本更新，防假阴 |
-| 部署 exe 的 WebView2 不向 CDP 派发 dialog 事件（2026-09-07 裸 alert 实证） | 弹窗类断言改走副作用（docs 状态/磁盘文件），勿依赖 dialog handler |
-| AHK 无 BOM 中文断言全废 | 脚本保存 UTF-8 带 BOM，改动后先跑一次确认非假 FAIL |
+| CDP drops modifier + letter keys (z lost, s arrives) | verify real keyboard behaviour only at the AHK layer |
+| Synthetic events intercepted by the Vditor element layer | the app exposes read-only __md* test hooks to bypass |
+| isComposing left over after non-ASCII SendText | AHK always types English/digits + SetEng() |
+| Long scripts with stale element references (#file-title lesson) | update fullcheck references with each version to avoid false negatives |
+| The deployed exe's WebView2 does not dispatch dialog events to CDP (bare alert proven 2026-09-07) | dialog assertions use side effects (docs state / files on disk), never a dialog handler |
+| AHK without BOM breaks non-ASCII assertions | save scripts as UTF-8 with BOM, run once after editing to rule out a false FAIL |
 
-### 功能快捷键速查（改键位冲突时对照）
+### Keyboard shortcut reference (check for conflicts when changing bindings)
 
-`Ctrl+Z/Y/Shift+Z` 撤销重做 · `Ctrl+F/H` 查找替换 · `Ctrl+S` 保存 · `Ctrl+P` 打印 · `Ctrl+Shift+O` 快速打开 · `Ctrl+Shift+F` 搜同级内容 · `F8` 专注模式 · `Ctrl+滚轮/0` 缩放复位 · `Ctrl+Click/Shift+Click` 标签多选。新增快捷键前先查 Vditor 内置热键表，冲突一律让位 Vditor 或挂钩子层。
+`Ctrl+Z/Y/Shift+Z` undo/redo · `Ctrl+F/H` find/replace · `Ctrl+S` save · `Ctrl+P` print · `Ctrl+Shift+O` quick open · `Ctrl+Shift+F` search sibling files · `F8` focus mode · `Ctrl+wheel/0` zoom/reset · `Ctrl+Click/Shift+Click` tab multi-select. Before adding a shortcut, check Vditor's built-in hotkey table; on conflict, yield to Vditor or hook at the capture layer.
 
-### 修改编辑行为前后的回归验证要求
+### Regression checks around editing-behaviour changes
 
-| 改动类型 | 改前 | 改后 |
+| Change type | Before | After |
 |---|---|---|
-| 撤销/重做/保存链 | 跑 B 组记基线 | B + fullcheck(A11) + AHK ^Z/^Y 断言 |
-| 键盘交互/快捷键 | 记录现有键位 | 对应组 + AHK（CDP 对修饰键字母有盲区） |
-| Vditor 实例化 options | — | 冒烟 18 断言（options 变更影响面大） |
-| 导出链 | C 组基线 | C + fullcheck(E) + 人工开产物核内容 |
-| 文件 IO（lib.rs） | cargo test 49 | cargo test + E/H/I/J |
+| Undo/redo/save chain | run group B for a baseline | B + fullcheck(A11) + AHK ^Z/^Y assertions |
+| Keyboard interaction/shortcuts | record current bindings | matching group + AHK (CDP has blind spots for modifier + letter) |
+| Vditor instantiation options | — | smoke 18 assertions (options changes have a wide impact) |
+| Export chain | group C baseline | C + fullcheck(E) + open the output by hand and check the content |
+| File IO (lib.rs) | cargo test | cargo test + E/H/I/J |
 
-- **P0**：v0.3.23 运行日志+诊断包已提交——观察真实使用中日志滚动与诊断包导出稳定性。
-- **P1**：自建全盘索引（替代 es.exe）首版已上——冷启动索引耗时 1-3 分钟的用户感知优化。
-- **P1**：撤销/重做六处病灶已闭环（a4d258a）——回归 B 组+fullcheck(A11) 保持全绿，防复发。
-- **待确认**：package.json version 0.1.0 是否改为随发版递增（当前版本真值在 README/git）。
+- **P0**: v0.3.23 run log + diagnostics bundle shipped — watch log rolling and diagnostics export stability in real use.
+- **P1**: custom drive-wide index (replacing es.exe) first version shipped — improve how the 1-3 minute cold index build feels to users.
+- **P1**: six undo/redo root causes closed (a4d258a) — keep group B + fullcheck(A11) green to prevent regressions.
+- **To confirm**: whether package.json version 0.1.0 should be bumped with each release (the real version lives in tauri.conf.json / git).
 
-### i18n 与文案纪律
+### UI text rules
 
-- 三份语言文件 `i18n-zh-CN.ts` / `i18n-zh-TW.ts` / `i18n-en.ts` **同步改**——加/改任何 UI 文案必须三处齐动，漏一份即混语界面。
-- 界面文案改动后跑 J 组（标签页/工具栏断言含文案匹配）。
-- 中文文案行注意全角标点不得混入代码标识符（历史坑：整块 script 语法死）。
+- The UI is English-only: all strings live in `UI_TEXT["en"]` in `main.ts` and in `i18n-en.ts` (Vditor tooltips); `index.html` holds English fallbacks for static labels.
+- Run group J after changing UI text (tab/toolbar assertions match text).
+- Never let full-width punctuation leak into code identifiers (historical trap: a whole script block died on a syntax error).
 
-### 导出格式与验证要点
+### Export formats and checks
 
-| 格式 | 关键验收点 |
+| Format | Key acceptance points |
 |---|---|
-| PDF | 矢量、文本可选中可搜索；分页不裁断表格行 |
-| HTML | 带样式/纯净两档；相对路径图片已嵌入 |
-| PNG 长图 | 超长文档分片多图，序号连续 |
-| docx | 原生编号嵌套列表、表格、脚注、图片真嵌入（非链接） |
+| PDF | vector, text selectable and searchable; page breaks never cut a table row |
+| HTML | styled / plain variants; relative-path images embedded |
+| PNG long image | very long documents split into several images, numbered consecutively |
+| docx | native nested numbered lists, tables, footnotes, images truly embedded (not links) |
 
-## 8. 回滚
+## 8. Rollback
 
-- 回滚走本地 git 仓库（tag/commit）；注意当前本地领先远端（v0.3.23，c13db25 之后多版未推 GitHub）——回滚只动本地，推送范围另行拍板。
+- Roll back via the local git repository (tag/commit); local is ahead of the remote — rollbacks only touch local, push scope is decided separately.

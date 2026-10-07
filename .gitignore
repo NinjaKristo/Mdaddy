@@ -12,11 +12,11 @@ dist
 dist-ssr
 *.local
 
-# Rust / Tauri 构建产物
+# Rust / Tauri build output
 src-tauri/target
 
-# Vditor 本地化资源（~23M，从 node_modules/vditor/dist 复制而来；
-# clone 后需手动复制：cp -r node_modules/vditor/dist/* public/vditor-assets/dist/）
+# Vditor local assets (~23MB, copied from node_modules/vditor/dist;
+# after cloning, copy manually: cp -r node_modules/vditor/dist/* public/vditor-assets/dist/)
 public/vditor-assets
 
 # Editor directories and files
@@ -30,3 +30,6 @@ public/vditor-assets
 *.sln
 *.sw?
 dist-portable/
+
+# Release builds
+release/

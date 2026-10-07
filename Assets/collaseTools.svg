@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Layer_2" data-name="Layer 2" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 211.68 72.72">
+  <defs>
+    <style>
+      .cls-1 {
+        stroke: #1fa491;
+        stroke-linejoin: round;
+        stroke-width: 2px;
+      }
+
+      .cls-1, .cls-2 {
+        fill: none;
+        stroke-linecap: round;
+      }
+
+      .cls-3 {
+        fill: #1fa491;
+      }
+
+      .cls-4 {
+        font-family: Arial-ItalicMT, Arial;
+        font-size: 28.93px;
+        font-style: italic;
+      }
+
+      .cls-5 {
+        filter: url(#drop-shadow-1);
+      }
+
+      .cls-6 {
+        fill: #fff;
+        stroke: #d0d2d3;
+      }
+
+      .cls-6, .cls-2 {
+        stroke-miterlimit: 10;
+      }
+
+      .cls-2 {
+        stroke: #fff;
+        stroke-width: 3px;
+      }
+
+      .cls-7 {
+        fill: #d0d2d3;
+      }
+    </style>
+    <filter id="drop-shadow-1" x="0" y="0" width="211.68" height="72.72" filterUnits="userSpaceOnUse">
+      <feOffset dx="3.65" dy="3.65"/>
+      <feGaussianBlur result="blur" stdDeviation="2.65"/>
+      <feFlood flood-color="#010101" flood-opacity=".1"/>
+      <feComposite in2="blur" operator="in"/>
+      <feComposite in="SourceGraphic"/>
+    </filter>
+  </defs>
+  <g id="Layer_1-2" data-name="Layer 1">
+    <g>
+      <g class="cls-5">
+        <rect class="cls-6" x="4.45" y="4.43" width="195.44" height="56.3" rx="12" ry="12"/>
+      </g>
+      <g>
+        <rect class="cls-1" x="165.74" y="28.58" width="14" height="14" rx="2" ry="2"/>
+        <path class="cls-1" d="M161.74,36.58c-1.1,0-2-.9-2-2v-10c0-1.1.9-2,2-2h10c1.1,0,2,.9,2,2"/>
+      </g>
+      <text class="cls-4" transform="translate(30.09 38.07) scale(.58)"><tspan x="0" y="0">TXT</tspan></text>
+      <line class="cls-6" x1="143.55" y1="4.43" x2="143.55" y2="60.73"/>
+      <line class="cls-6" x1="89.02" y1="4.43" x2="89.02" y2="60.73"/>
+      <g>
+        <rect class="cls-3" x="89.77" y="5.18" width="53.03" height="54.8"/>
+        <path class="cls-7" d="M142.05,5.93v53.3h-51.53V5.93h51.53ZM143.55,4.43h-54.53v56.3h54.53V4.43h0Z"/>
+      </g>
+      <g>
+        <line class="cls-2" x1="120.22" y1="23.95" x2="109.92" y2="33.58"/>
+        <line class="cls-2" x1="120.22" y1="43.22" x2="109.92" y2="33.58"/>
+      </g>
+    </g>
+  </g>
+</svg>

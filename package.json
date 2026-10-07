@@ -1,11 +1,11 @@
 {
-  "name": "md-editor",
+  "name": "mdaddy",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
+    "dev": "node scripts/copy-vditor-assets.mjs && vite",
+    "build": "node scripts/copy-vditor-assets.mjs && tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"
   },
