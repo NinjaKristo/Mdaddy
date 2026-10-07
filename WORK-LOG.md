@@ -100,3 +100,11 @@ This log records recovery and implementation work, design decisions, and verific
 - `cargo build --release --bins --features tauri/custom-protocol` passed.
 - `release/Mdaddy.exe` was atomically replaced and its SHA-256 matches the build output: `BBC19FE46C7350277969D43651B3CD20741A40A01642CD98707F7B7E9B5B6B75`.
 - Release smoke test was attempted and correctly stopped because the existing Mdaddy process holds the single-instance lock. The running window was left untouched; close and reopen it to load the new icon and toolbar fix, then rerun the release E2E tests.
+
+## 2026-10-07 — Publish project README and screenshots
+
+- Replaced the placeholder README with current Mdaddy feature and build information.
+- Replaced the outdated generated logo image with a crop of the current app logo and added `docs/screenshots/main.png` from the current UI.
+- Committed and pushed to `NinjaKristo/Mdaddy` `main` as `923c6bd` (`Polish Mdaddy toolbar, icons, and project docs`).
+- Confirmed GitHub serves the new README and screenshot from `main`.
+- The `origin` remote already points to `https://github.com/NinjaKristo/Mdaddy`; GitHub still marks it as a fork of `frandy820/md-editor`. The documented “Leave fork network” setting requires the GitHub Settings UI. No browser is available in this session, so that setting remains to be applied.
