@@ -3,31 +3,37 @@
 </p>
 
 <p align="center">
-  <b>A simple, friendly writing app for Windows.</b><br>
-  Open a file, start typing, and see it look nice right away. No setup, no accounts, no internet needed.
+  A focused Markdown editor for Windows, with visual editing and direct access to the source.
 </p>
 
 <p align="center">
-  <img src="docs/screenshot-placeholder.svg" alt="Mdaddy screenshot" width="100%">
+  <img src="docs/screenshots/main.png" alt="Mdaddy editor showing its outline, formatting toolbar, and document view" width="100%">
 </p>
 
-## What you can do
+## Features
 
-- ✍️ **Write and see it formatted as you go** — headings, lists, bold text, all shown nicely while you type
-- 📊 **Make tables easily** — click a cell and type, add or remove rows with one button
-- 🗂️ **Open lots of files at once** in tabs, and pick up right where you left off next time
-- 🎨 **Pick a look you like** — light, dark, eye-care green or warm paper
-- 🔀 **Switch between preview and raw Markdown** with Ctrl+Alt+M
-- 📤 **Save as PDF, Word, web page or picture** to share with anyone
-- ↩️ **Undo mistakes** — and every save keeps an older copy, just in case
+- Edit Markdown in a visual editor or switch to raw-by-line mode with <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd>.
+- Navigate long documents with the outline and open several files in tabs.
+- Browse folders, search for Markdown files, and keep favorite folders close at hand.
+- Paste images and choose how to store them, then resize them in the editor.
+- Choose a light, dark, eye-care, or warm-paper appearance.
+- Use keyboard shortcuts, undo, and export tools while keeping your Markdown files on your computer.
 
-## Get it
+## Download
 
-1. Download **md-editor.exe** from the [Releases](../../releases) page
-2. Double-click it — that's it, nothing to install
+Check the [GitHub Releases](https://github.com/NinjaKristo/Mdaddy/releases) page for Windows builds. The application is distributed as a standalone `Mdaddy.exe`.
 
-Works on Windows 10 and 11.
+## Build from source
+
+Requirements: Windows 10 or 11, Node.js, Rust, and the Microsoft C++ Build Tools required by Tauri.
+
+```powershell
+npm install
+npm run tauri build
+```
+
+The packaged Windows executable is produced under `src-tauri/target/release/`. The project build workflow can also update `release/Mdaddy.exe` for local testing.
 
 ## License
 
-Free to use — [MIT](LICENSE)
+Mdaddy is distributed under the MIT License. See [LICENSE](LICENSE) for the license and copyright notice.

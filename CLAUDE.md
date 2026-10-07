@@ -21,7 +21,7 @@
 | Backend | `src-tauri/src/lib.rs` + `main.rs` (Rust commands: file IO / encoding detection / drive index / single-instance forwarding) |
 | Tests | `tests/TEST-PLAN.md` (single entry point: five layers + module → group map + blind-spot countermeasures); scripts in `output/md-editor-typora-scan/` (e2e_user_J_v0321.py · ahk_smoke_v1.ahk) + `output/md-editor-largefile-v0325/` (e2e_user_L_v0325.py large-file suite + headless benchmarks) |
 | Version | package.json 0.1.0 (not tracked); the real version is in tauri.conf.json / git tag |
-| Icon | `src-tauri/icons/icon.ico` = `.vscode/Mdaddy.ico`; PNG sizes generated with `npx tauri icon` |
+| Icon | Windows/app icons are generated from vector source `Assets/MdaddyIcon-App.svg` (a square-padded form of `Assets/MdaddyIcon.svg`) with `npx tauri icon`; do not copy an older raster `.ico` |
 
 **Startup chain**: `npm run dev` (Vite) → `npm run tauri dev`; production: see the deploy chain below.
 
@@ -76,6 +76,13 @@ Group M scripts: `output/md-editor-session-v0326/` (e2e_user_M_v0326.py M1-13 + 
 
 ## 3. Common commands
 
+### Permanent release acceptance rule
+
+- Every UI delivery/checkpoint must update `release/Mdaddy.exe` from the current build. Do not treat a successful Vite or Cargo build alone as a completed UI change.
+- Use `bash scripts/build-release.sh`: it regenerates platform icons from the authored SVG, builds the frontend, builds and copies the executable, verifies byte-for-byte parity, then runs the smoke and UI-controls E2E tests against `release/Mdaddy.exe` in isolated data profiles.
+- The app is single-instance. If an Mdaddy process is already open, do not kill it or let tests silently forward to it. Close it normally when safe, then rerun the release tests; until then, report the UI test as blocked.
+- Keep `tests/e2e/cdp.py` pointed at the release executable so the acceptance checks cover what will actually be launched from `release/`.
+
 ```bash
 # Full release build (frontend THEN exe, copies to release/Mdaddy.exe). Never cargo-build without npm run build first.
 bash scripts/build-release.sh
@@ -94,9 +101,9 @@ cd src-tauri && cargo test
 python e2e_user_J_v0321.py                              # 18 assertions
 "/c/Program Files/AutoHotkey/v2/AutoHotkey64.exe" ahk_smoke_v26.ahk  # 7 assertions, desktop must be online (run the script from C: Temp)
 
-# Production build chain
-npm run build && cd src-tauri && cargo build --release --bins --features tauri/custom-protocol
-# → release exe: src-tauri/target/release/md-editor.exe (copy to release/Mdaddy.exe, md5 compare)
+# Production build and acceptance test (frontend, exe, release copy, then E2E)
+bash scripts/build-release.sh
+# → release/Mdaddy.exe; byte-compared with src-tauri/target/release/mdaddy.exe
 ```
 
 - cargo lives in `~/.cargo/bin` (not on the Bash PATH by default: `export PATH="$HOME/.cargo/bin:$PATH"`).

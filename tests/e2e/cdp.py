@@ -7,11 +7,21 @@ import json, os, shutil, subprocess, tempfile, time, urllib.request
 import websocket
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-EXE = os.path.join(ROOT, "src-tauri", "target", "release", "mdaddy.exe")
+EXE = os.path.join(ROOT, "release", "Mdaddy.exe")
+
+
+def ensure_no_running_instance():
+    """The single-instance plugin forwards launches to an open window, which has no test CDP port."""
+    if os.name != "nt":
+        return
+    result = subprocess.run(["tasklist", "/FI", "IMAGENAME eq mdaddy.exe", "/NH"], capture_output=True, text=True)
+    if "mdaddy.exe" in result.stdout.lower():
+        raise RuntimeError("Close the running Mdaddy window before release E2E tests; the tests must launch the newly built executable.")
 
 
 class App:
     def __init__(self, args=(), port=9333, exe=EXE, env_extra=None):
+        ensure_no_running_instance()
         env = dict(os.environ)
         env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = f"--remote-debugging-port={port}"
         if env_extra:

@@ -53,7 +53,7 @@ try:
     app.js("[...document.querySelectorAll('.tab')].find(t => t.textContent.includes('Trip plan'))?.click()")
     app.js("document.querySelector('#side-tab-outline').click()")
     shot(app, "2-main.png")
-    b = app.js("JSON.stringify((() => { const r = document.querySelector('#editor .vditor-toolbar [data-type=\"bold\"]').getBoundingClientRect(); return [r.left + r.width/2, r.top + r.height/2]; })())")
+    b = app.js("JSON.stringify((() => { const r = document.querySelector('#toolbar .vditor-toolbar [data-type=\"bold\"]').getBoundingClientRect(); return [r.left + r.width/2, r.top + r.height/2]; })())")
     import json
     x, y = json.loads(b)
     app.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})

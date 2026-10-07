@@ -1311,7 +1311,7 @@ function moveSection(dragId: string, targetId: string, pos: "before" | "after") 
 // Toolbar tooltip text comes from the i18n injected into Vditor; here we only flip the direction downward,
 // to avoid #editor-wrap overflow:hidden clipping it at the top ([TAURI-01] pitfall 4)
 function fixToolbarTooltipDirection() {
-  document.querySelectorAll<HTMLElement>("#editor .vditor-toolbar [data-type]").forEach((btn) => {
+      document.querySelectorAll<HTMLElement>("#toolbar .vditor-toolbar [data-type]").forEach((btn) => {
     btn.className = btn.className.replace(/vditor-tooltipped__n[we]?/, "vditor-tooltipped__s");
   });
 }
@@ -3754,13 +3754,24 @@ function vditorOptions(mode: EditorMode): VditorOptions {
       scheduleOutline();
     },
     after: () => {
-      // Keep the Find and text-color controls at the end of the centered formatting toolbar.
+      // Keep the Find and text-color controls at the end of the top-line formatting toolbar.
       // Vditor rebuilds this row when switching Preview/Raw, so reattach the persistent control after each mount.
       const formatToolbar = document.querySelector("#editor .vditor-toolbar");
+      // Keep the formatter on the app's top line beside the brand. Moving the
+      // live toolbar preserves Vditor's bound controls while allowing the shell
+      // row to grow and wrap naturally at narrow window widths.
+      if (formatToolbar) {
+        const shell = document.getElementById("toolbar");
+        shell?.querySelectorAll<HTMLElement>(":scope > .vditor-toolbar").forEach((old) => {
+          if (old !== formatToolbar) old.remove();
+        });
+        shell?.appendChild(formatToolbar);
+      }
       if (formatToolbar && textColorControlsEl) {
         formatToolbar.appendChild(textColorControlsEl);
         textColorControlsEl.removeAttribute("hidden");
       }
+      styleToolbarGlyphs();
       fixToolbarTooltipDirection();
       setupUndoToolbar(); // v0.3.21 undo/redo button hijack (rebound after a mode/language switch rebuilds the toolbar)
       // v0.4.1 reassert the Vditor level after every mount/rebuild (including the hljs codeTheme — options has no such field,
@@ -3842,11 +3853,11 @@ function initVditor() {
 // pop two steps; a button click is fully equivalent to the user clicking the toolbar button, and single-step behaviour is verified correct. Reused by the Ctrl+Z/Y/Shift+Z shortcuts.
 function doUndo() {
   if (!vditor) return;
-  document.querySelector<HTMLElement>('#editor .vditor-toolbar [data-type="undo"]')?.click();
+  document.querySelector<HTMLElement>('#toolbar .vditor-toolbar [data-type="undo"]')?.click();
 }
 function doRedo() {
   if (!vditor) return;
-  document.querySelector<HTMLElement>('#editor .vditor-toolbar [data-type="redo"]')?.click();
+  document.querySelector<HTMLElement>('#toolbar .vditor-toolbar [data-type="redo"]')?.click();
 }
 
 // Switch edit mode: Vditor 3.11.2 has no runtime changeMode, the only reliable way = destroy the instance + rebuild with the target mode.
@@ -6364,6 +6375,21 @@ function toggleReaderMode(): void {
   window.setTimeout(updateReaderModeIcon, 50);
 }
 
+function styleToolbarGlyphs(): void {
+  const glyphs: Record<string, string> = {
+    headings: '<span class="mdaddy-toolbar-glyph mdaddy-glyph-heading" aria-hidden="true">H</span>',
+    bold: '<span class="mdaddy-toolbar-glyph mdaddy-glyph-bold" aria-hidden="true">B</span>',
+    italic: '<span class="mdaddy-toolbar-glyph mdaddy-glyph-italic" aria-hidden="true">i</span>',
+    quote: '<svg class="mdaddy-quote-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h6v6H7.7c.2 2.4 1.3 4 3.3 4.9v3.1C6.8 17.5 5 14.4 5 10.1V5Zm8 0h6v6h-3.3c.2 2.4 1.3 4 3.3 4.9v3.1c-4.2-1.5-6-4.6-6-8.9V5Z"/></svg>',
+    check: '<svg class="mdaddy-check-glyph" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="1.2" fill="#15191b"/><path d="m6.8 12.2 3.5 3.4 7-7.2" fill="none" stroke="#1fa491" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  };
+  for (const [type, html] of Object.entries(glyphs)) {
+    const button = document.querySelector<HTMLElement>(`#toolbar .vditor-toolbar [data-type="${type}"]`);
+    if (!button || button.querySelector(".mdaddy-toolbar-glyph, .mdaddy-quote-glyph, .mdaddy-check-glyph")) continue;
+    button.innerHTML = html;
+  }
+}
+
 function updateReaderModeIcon(): void {
   const full = !!document.querySelector("#editor .vditor--fullscreen");
   const img = document.querySelector<HTMLImageElement>("#btn-reader-toggle img");
@@ -6376,16 +6402,16 @@ function updateReaderModeIcon(): void {
 }
 
 function clickTool(type: string): void {
-  const b = document.querySelector<HTMLElement>(`#editor .vditor-toolbar [data-type="${type}"]`);
+  const b = document.querySelector<HTMLElement>(`#toolbar .vditor-toolbar [data-type="${type}"]`);
   if (!b || b.classList.contains("vditor-menu--disabled")) return;
   b.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
 }
 
 function setHeading(level: number): void {
   clickTool("headings");
-  const item = document.querySelector<HTMLElement>(`#editor .vditor-toolbar [data-tag="h${level}"]`);
+  const item = document.querySelector<HTMLElement>(`#toolbar .vditor-toolbar [data-tag="h${level}"]`);
   item?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-  document.querySelectorAll<HTMLElement>("#editor .vditor-toolbar .vditor-hint, #editor .vditor-toolbar .vditor-panel--arrow")
+  document.querySelectorAll<HTMLElement>("#toolbar .vditor-toolbar .vditor-hint, #toolbar .vditor-toolbar .vditor-panel--arrow")
     .forEach((p) => { p.style.display = "none"; });
 }
 

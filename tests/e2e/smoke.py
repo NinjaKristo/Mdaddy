@@ -12,8 +12,8 @@ app = App([md])
 try:
     r.check("window title is Mdaddy", app.wait("document.title === 'Mdaddy'"), app.js("document.title"))
     r.check("editor initialised (lute loaded)", app.wait("!!document.querySelector('#editor .vditor-reset')"))
-    r.check("format toolbar present", app.wait("document.querySelectorAll('#editor .vditor-toolbar [data-type]').length > 10"),
-            str(app.js("document.querySelectorAll('#editor .vditor-toolbar [data-type]').length")))
+    r.check("format toolbar present", app.wait("document.querySelectorAll('#toolbar .vditor-toolbar [data-type]').length > 10"),
+            str(app.js("document.querySelectorAll('#toolbar .vditor-toolbar [data-type]').length")))
     r.check(".md content loaded", app.wait("document.querySelector('#editor .vditor-reset').innerText.includes('Hello Mdaddy')"))
     r.check("table rendered", app.wait("!!document.querySelector('#editor .vditor-reset table')"))
     r.check("tab shows file name", app.wait("[...document.querySelectorAll('.tab')].some(t => t.textContent.includes('hello.md'))"))

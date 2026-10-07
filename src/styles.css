@@ -119,7 +119,7 @@ html[data-theme="eye"] #editor .vditor,
 html[data-theme="eye"] #editor .vditor-content { background-color: #C7EDCC; }
 /* v0.4.0 fix: Vditor's format toolbar (bold/italic row) background is controlled by Vditor's internal theme,
    always white in classic — a glaring white strip under eye-care/warm paper (user report); force the theme background through */
-html[data-theme="eye"] #editor .vditor-toolbar { background-color: #cfe6d4 !important; }
+html[data-theme="eye"] #toolbar .vditor-toolbar { background-color: #cfe6d4 !important; }
 /* The text layer (pre.vditor-reset) white background comes from CSS Vditor inserts at runtime, loaded after this file,
    which beats normal priority — fight it with !important; eye-care must reach the content layer where the caret is */
 html[data-theme="eye"] .vditor-reset { background-color: transparent !important; }
@@ -147,7 +147,7 @@ html[data-theme="paper"] {
 html[data-theme="paper"] #editor,
 html[data-theme="paper"] #editor .vditor,
 html[data-theme="paper"] #editor .vditor-content { background-color: #f7f1e0; }
-html[data-theme="paper"] #editor .vditor-toolbar { background-color: #e2d7bc !important; }
+html[data-theme="paper"] #toolbar .vditor-toolbar { background-color: #e2d7bc !important; }
 html[data-theme="paper"] .vditor-reset { background-color: transparent !important; }
 /* code blocks brown background + border: locked high contrast on warm paper */
 html[data-theme="paper"] .vditor-reset code,
@@ -255,21 +255,21 @@ html[data-theme="light"] .vditor-reset table thead th {
 html[data-theme="light"] .vditor-reset hr { border: none; border-top: 1px solid var(--border2); background: none; }
 
 #toolbar {
-  height: 52px; flex: 0 0 auto;
-  display: flex; align-items: center; justify-content: flex-start; gap: 6px;
-  padding: 0 6px;
+  min-height: 52px; height: auto; flex: 0 0 auto;
+  display: flex; flex-flow: row wrap; align-items: center; align-content: center; justify-content: flex-start; gap: 0 6px;
+  padding: 0 12px 0 6px;
   background: var(--bg); border-bottom: 1px solid var(--border2);
   position: relative;
 }
 /* v0.3.28 grouped layout: file/output/tools … (flexible gap) … mode/settings */
 .tb-group { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
-#brand-wrap { position: relative; display: inline-flex; align-items: center; flex: 0 0 auto; height: 100%; }
+#brand-wrap { position: relative; display: inline-flex; align-items: center; flex: 0 0 auto; height: auto; min-height: 52px; }
 #toolbar #btn-brand-logo, #toolbar #btn-brand-menu { display: inline-flex; align-items: center; justify-content: center; padding: 3px !important; border: 0; background: transparent; cursor: pointer; }
-#btn-brand-logo { width: 34px; height: 34px; }
-#btn-brand-logo img { display: block; width: 32px; height: 32px; object-fit: contain; }
-#brand-wordmark { display: block; width: 100px; height: 28px; object-fit: contain; }
-#btn-brand-menu { width: 24px; height: 30px; margin-left: 2px; }
-#btn-brand-menu img { display: block; width: 17px; height: 17px; object-fit: contain; }
+#btn-brand-logo { width: 20px; height: 24px; }
+#btn-brand-logo img { display: block; width: 16px; height: 18px; object-fit: contain; }
+#brand-wordmark { display: block; width: 50px; height: 14px; object-fit: contain; }
+#btn-brand-menu { width: 18px; height: 24px; margin-left: 1px; }
+#btn-brand-menu img { display: block; width: 12px; height: 12px; object-fit: contain; }
 #brand-menu { position: absolute; top: calc(100% - 1px); left: 0; z-index: 2147483640; width: 218px; box-sizing: border-box; padding: 8px; border: 1px solid var(--border2); border-radius: 0 0 var(--r-md) var(--r-md); background: var(--bg-surface); box-shadow: var(--shadow); transition: filter .12s ease, opacity .12s ease; }
 #brand-menu[hidden] { display: none; }
 #brand-menu > button { display: flex; align-items: center; justify-content: flex-start; gap: 14px; width: 100%; height: 42px; padding: 5px 9px; text-align: left; border: 0; border-radius: var(--r-sm); background: transparent; font-size: 15px; font-weight: 500; color: var(--text2); cursor: pointer; }
@@ -629,14 +629,14 @@ html[data-theme="dark"] #gsearch-results mark { background: rgba(255,180,0,0.4);
 .empty-hint { color: var(--muted2); font-size: 14px; text-align: center; line-height: 1.9; padding: 0 24px; }
 
 /* table / edit-mode have dropdown panels that easily cover the tooltip; raise their layer separately */
-#editor .vditor-toolbar button[data-type="table"]::after,
-#editor .vditor-toolbar button[data-type="edit-mode"]::after,
-#editor .vditor-toolbar button[data-type="table"]::before,
-#editor .vditor-toolbar button[data-type="edit-mode"]::before {
+#toolbar .vditor-toolbar button[data-type="table"]::after,
+#toolbar .vditor-toolbar button[data-type="edit-mode"]::after,
+#toolbar .vditor-toolbar button[data-type="table"]::before,
+#toolbar .vditor-toolbar button[data-type="edit-mode"]::before {
   z-index: 1000005 !important;
 }
-/* Match the PDF's centered formatting strip and Mdaddy teal. Vditor writes an obsolete outline offset inline;
-   our outline lives in the app sidebar, so center the actual toolbar controls independently of that value. */
+/* Match the PDF's formatting strip and Mdaddy teal. Vditor's obsolete outline offset is ignored;
+   the live toolbar is aligned to the right in the app header. */
 #editor .vditor {
   --toolbar-background-color: #f0f2f3;
   --toolbar-icon-color: #262f33;
@@ -661,15 +661,43 @@ html[data-theme="paper"] #editor .vditor {
   --toolbar-icon-hover-color: #8b8a29;
   --border-color: #c9b98e;
 }
-#editor .vditor-toolbar {
-  display: flex; align-items: center; justify-content: center; flex-wrap: wrap;
-  position: relative; z-index: 7; overflow: visible; padding: 2px 8px !important;
+#toolbar .vditor-toolbar {
+  flex: 1 1 380px; min-width: 0; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: flex-end; align-content: center; flex-wrap: wrap;
+  position: relative; z-index: 7; overflow: visible; padding: 2px 0 2px 8px !important;
+  --toolbar-background-color: #f0f2f3;
+  --toolbar-icon-color: #262f33;
+  --toolbar-icon-hover-color: #1fa491;
+  --border-color: #d5dadd;
+  background: var(--toolbar-background-color);
 }
-#editor .vditor-toolbar__item { float: none; }
-#editor .vditor-toolbar__item .vditor-tooltipped:hover,
-#editor .vditor-toolbar__item .vditor-tooltipped.vditor-menu--current {
+html[data-theme="dark"] #toolbar .vditor-toolbar { --toolbar-background-color: #1b1e21; --toolbar-icon-color: #d0d6d7; --toolbar-icon-hover-color: #43c3ae; --border-color: #353b3e; }
+html[data-theme="eye"] #toolbar .vditor-toolbar { --toolbar-background-color: #cfe6d4; --toolbar-icon-color: #2b3a2e; --toolbar-icon-hover-color: #2d967f; --border-color: #a8cdb1; }
+html[data-theme="paper"] #toolbar .vditor-toolbar { --toolbar-background-color: #e2d7bc; --toolbar-icon-color: #3b3222; --toolbar-icon-hover-color: #8b8a29; --border-color: #c9b98e; }
+#toolbar .vditor-toolbar__item { float: none; }
+#toolbar .vditor-counter { display: none !important; }
+#toolbar .vditor-toolbar__item .vditor-tooltipped:hover,
+#toolbar .vditor-toolbar__item .vditor-tooltipped.vditor-menu--current {
   color: var(--toolbar-icon-hover-color); background: color-mix(in srgb, var(--toolbar-icon-hover-color) 12%, var(--toolbar-background-color));
 }
+/* Native fullscreen duplicates the dedicated book button. Keep its control available to
+   the book button's click handler, while showing only one Reader Mode icon. */
+#toolbar .vditor-toolbar__item:has([data-type="fullscreen"]) { display: none !important; }
+#toolbar .vditor-toolbar__item [data-type="headings"],
+#toolbar .vditor-toolbar__item [data-type="bold"],
+#toolbar .vditor-toolbar__item [data-type="italic"] { color: #3e4549; }
+.mdaddy-toolbar-glyph { display: inline-block; width: var(--tb-icon); height: var(--tb-icon); font: 700 var(--tb-icon)/1 Arial, sans-serif; text-align: center; }
+.mdaddy-glyph-heading, .mdaddy-glyph-bold { font-weight: 700; }
+.mdaddy-glyph-italic { font-style: italic; }
+.mdaddy-quote-glyph, .mdaddy-check-glyph { display: block; width: var(--tb-icon); height: var(--tb-icon); }
+.mdaddy-quote-glyph { fill: #1fa491; }
+/* Visually reverse the Markdown levels for quick comparison in the size menu. */
+#toolbar .vditor-toolbar [data-tag="h1"] { font-size: 8px !important; }
+#toolbar .vditor-toolbar [data-tag="h2"] { font-size: 10px !important; }
+#toolbar .vditor-toolbar [data-tag="h3"] { font-size: 12px !important; }
+#toolbar .vditor-toolbar [data-tag="h4"] { font-size: 15px !important; }
+#toolbar .vditor-toolbar [data-tag="h5"] { font-size: 18px !important; }
+#toolbar .vditor-toolbar [data-tag="h6"] { font-size: 21px !important; }
 /* Word-style writing margins in every edit mode. Keep both sides equal and shrink them
    with the editor width so a narrow window still has room to type. Vditor writes inline
    padding on .vditor-reset, so these horizontal values need !important. */
@@ -828,20 +856,23 @@ html[data-theme="paper"] #editor .vditor {
 #text-color-controls { display: inline-flex; align-items: center; gap: 2px; flex: 0 0 auto; }
 #text-color-controls[hidden] { display: none; }
 #text-color-wrap { position: relative; display: inline-flex; align-items: center; flex: 0 0 auto; }
-#editor .vditor-toolbar #btn-reader-toggle { width: 34px; min-width: 34px; padding: 3px; }
-#btn-reader-toggle img { display: block; width: 24px; height: 24px; object-fit: contain; }
-#editor .vditor-toolbar #btn-toolbar-find { width: 34px; min-width: 34px; padding: 3px; }
-#btn-toolbar-find svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-#text-color-button { min-width: 34px; font-weight: 700; }
-#text-color-button .text-color-glyph { display: block; width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+#toolbar .vditor-toolbar #btn-reader-toggle,
+#toolbar .vditor-toolbar #btn-toolbar-find { width: calc(var(--tb-icon) + 10px); min-width: calc(var(--tb-icon) + 10px); height: calc(var(--tb-icon) + 10px); padding: 3px; border: 0; outline: 0; box-shadow: none; }
+#toolbar .vditor-toolbar #btn-reader-toggle,
+#toolbar .vditor-toolbar #btn-toolbar-find,
+#toolbar .vditor-toolbar #text-color-button { border: 0 !important; outline: none !important; box-shadow: none !important; }
+#btn-reader-toggle img { display: block; width: var(--tb-icon); height: var(--tb-icon); object-fit: contain; }
+#btn-toolbar-find svg { width: var(--tb-icon); height: var(--tb-icon); fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+#text-color-button { min-width: calc(var(--tb-icon) + 10px); width: calc(var(--tb-icon) + 10px); height: calc(var(--tb-icon) + 10px); padding: 2px; font-weight: 700; border: 0 !important; outline: 0; box-shadow: none; }
+#text-color-button .text-color-glyph { display: block; width: var(--tb-icon); height: var(--tb-icon); fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 #text-color-button .text-color-underline { stroke: var(--accent); stroke-width: 2.2; }
-#editor .vditor-toolbar #text-color-wrap { margin: 0 3px; }
-#editor .vditor-toolbar #text-color-button {
-  min-width: 0; width: 28px; height: 28px; padding: 2px; justify-content: center;
-  border: 1px solid #aeb9bc; border-radius: 2px; color: var(--toolbar-icon-color);
+#toolbar .vditor-toolbar #text-color-wrap { margin: 0 3px; }
+#toolbar .vditor-toolbar #text-color-button {
+  min-width: calc(var(--tb-icon) + 10px); width: calc(var(--tb-icon) + 10px); height: calc(var(--tb-icon) + 10px); padding: 2px; justify-content: center;
+  border: 0; border-radius: 2px; color: var(--toolbar-icon-color);
 }
-#editor .vditor-toolbar #text-color-button:hover { color: var(--toolbar-icon-hover-color); border-color: var(--toolbar-icon-hover-color); }
-#editor .vditor-toolbar #text-color-button .text-color-glyph { width: 23px; height: 23px; }
+#toolbar .vditor-toolbar #text-color-button:hover { color: var(--toolbar-icon-hover-color); }
+#toolbar .vditor-toolbar #text-color-button .text-color-glyph { width: var(--tb-icon); height: var(--tb-icon); }
 #text-color-menu {
   position: absolute; right: 0; top: calc(100% + 4px); z-index: 2100000;
   display: grid; grid-template-columns: repeat(4, 30px); gap: 4px; padding: 7px;
@@ -1065,16 +1096,16 @@ body.reading-focus #sb-focus { display: inline-block; }
 :root { --tb-icon: 14px; }
 
 /* format toolbar: every icon the same size (headings/bold/italic used to render larger), whole bar scales with Settings > Appearance */
-#editor .vditor-toolbar { min-height: 0; line-height: 1; padding-top: 2px; padding-bottom: 2px; }
-#editor .vditor-toolbar__item .vditor-tooltipped {
+#toolbar .vditor-toolbar { min-height: 0; line-height: 1; padding-top: 2px; padding-bottom: 2px; }
+#toolbar .vditor-toolbar__item .vditor-tooltipped {
   padding: calc(var(--tb-icon) * 0.3) calc(var(--tb-icon) * 0.35);
   height: auto; width: auto; line-height: 0;
 }
-#editor .vditor-toolbar__item svg,
-#editor .vditor-toolbar__item .vditor-tooltipped svg {
+#toolbar .vditor-toolbar__item svg,
+#toolbar .vditor-toolbar__item .vditor-tooltipped svg {
   width: var(--tb-icon) !important; height: var(--tb-icon) !important; float: none; vertical-align: middle;
 }
-#editor .vditor-toolbar__divider { height: calc(var(--tb-icon) + 6px); margin: 0 4px; }
+#toolbar .vditor-toolbar__divider { height: calc(var(--tb-icon) + 6px); margin: 0 4px; }
 /* Vditor's own CSS tooltips are replaced by #app-tip (they were clipped by the sidebar / window edge) */
 .vditor-tooltipped::before, .vditor-tooltipped::after { display: none !important; }
 
@@ -1128,11 +1159,11 @@ kbd {
 .settings-head h2 { margin: 0; font-size: 16px; flex: 1; }
 .settings-brand { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 2px; margin-left: -12px; }
 .settings-brand button { display: inline-flex; align-items: center; justify-content: center; padding: 2px; border: 0; background: transparent; cursor: pointer; }
-.settings-brand-mark { width: 28px; height: 28px; }
-.settings-brand-mark img { display: block; width: 26px; height: 26px; object-fit: contain; }
-.settings-brand-wordmark { display: block; width: 78px; height: 23px; object-fit: contain; }
-.settings-brand-menu { width: 20px; height: 24px; }
-.settings-brand-menu img { display: block; width: 15px; height: 15px; object-fit: contain; }
+.settings-brand-mark { width: 20px; height: 24px; }
+.settings-brand-mark img { display: block; width: 16px; height: 18px; object-fit: contain; }
+.settings-brand-wordmark { display: block; width: 50px; height: 14px; object-fit: contain; }
+.settings-brand-menu { width: 18px; height: 24px; }
+.settings-brand-menu img { display: block; width: 12px; height: 12px; object-fit: contain; }
 .settings-close { border: none; background: none; font-size: 16px; cursor: pointer; color: var(--text3); }
 .settings-main { flex: 1; display: flex; min-height: 0; }
 .settings-nav { width: 150px; border-right: 1px solid var(--border2); padding: 10px 6px; display: flex; flex-direction: column; gap: 2px; background: var(--bg-panel); }
