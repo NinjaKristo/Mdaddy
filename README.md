@@ -36,6 +36,17 @@ bash scripts/build-release.sh
 
 The script builds the frontend and Windows executable, updates the app icons, copies the executable to `release/Mdaddy.exe`, and runs the release smoke and UI-controls checks. Rust build output is also available under `src-tauri/target/release/`.
 
+## Publish a release
+
+Push a version tag after updating the matching version in `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`:
+
+```bash
+git tag v0.6.0
+git push origin v0.6.0
+```
+
+GitHub Actions builds and checks the Windows executable, then creates the GitHub Release and attaches `Mdaddy.exe`. No manual upload or personal access token needed. See `.github/workflows/release.yml`.
+
 ## UI and icon guide
 
 See [docs/UI-BUTTONS.md](docs/UI-BUTTONS.md) for the control-to-feature map and artwork locations. Most authored artwork lives in `Assets/`; `public/mdaddy-icon.svg` generates the application icons, including the Windows `.ico`.

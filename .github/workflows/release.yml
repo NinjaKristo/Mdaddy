@@ -1,0 +1,45 @@
+name: Build and publish Windows release
+
+"on":
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Python test dependency
+        run: python -m pip install websocket-client
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build and verify release executable
+        shell: bash
+        run: bash scripts/build-release.sh
+
+      - name: Publish GitHub release with executable
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create $env:GITHUB_REF_NAME release/Mdaddy.exe
+          --title "Mdaddy $env:GITHUB_REF_NAME"
+          --generate-notes
