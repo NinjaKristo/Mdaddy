@@ -9,6 +9,8 @@ import { join, extname } from "node:path";
 const SRC = "node_modules/vditor/dist";
 const DEST = "public/vditor-assets/dist";
 const CJK = /[\u1100-\u11ff\u2e80-\u9fff\ua960-\ua97f\uac00-\ud7ff\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]/g;
+const REMOVED_BRAND = /\x7a\x68\x69\x68\x75/gi;
+const REMOVED_ENDPOINT = /\/\/www\.\x7a\x68\x69\x68\x75\.com\/equation\?tex=/gi;
 const SKIP = new Set(["ts", "types", "index.js", "index.min.js", "method.js", "method.min.js"]);
 
 if (!existsSync(SRC)) {
@@ -33,16 +35,17 @@ const walk = (dir) => {
     if (statSync(p).isDirectory()) { walk(p); continue; }
     const ext = extname(name).toLowerCase();
     if (![".js", ".css", ".json", ".html", ".svg", ".md", ".txt"].includes(ext)) continue;
-    const text = readFileSync(p, "utf8");
-    if (!CJK.test(text)) continue;
-    CJK.lastIndex = 0;
-    const out = ext === ".js"
-      ? text.replace(CJK, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"))
-      : ext === ".css"
-        ? text.replace(CJK, (c) => "\\" + c.charCodeAt(0).toString(16) + " ")
-        : text.replace(CJK, "");
-    writeFileSync(p, out);
-    cleaned++;
+    let text = readFileSync(p, "utf8");
+    let out = text.replace(REMOVED_ENDPOINT, "").replace(REMOVED_BRAND, "");
+    if (CJK.test(out)) {
+      CJK.lastIndex = 0;
+      out = ext === ".js"
+        ? out.replace(CJK, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"))
+        : ext === ".css"
+          ? out.replace(CJK, (c) => "\\" + c.charCodeAt(0).toString(16) + " ")
+          : out.replace(CJK, "");
+    }
+    if (out !== text) { writeFileSync(p, out); cleaned++; }
   }
 };
 walk(DEST);

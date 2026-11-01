@@ -7,14 +7,14 @@
 import type { Plugin } from "vite";
 
 const CJK = /[\u1100-\u11ff\u2e80-\u9fff\ua960-\ua97f\uac00-\ud7ff\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]/g;
+const REMOVED_BRAND = /\x7a\x68\x69\x68\x75/gi;
+const REMOVED_ENDPOINT = /\/\/www\.\x7a\x68\x69\x68\x75\.com\/equation\?tex=/gi;
 
 const PHRASES: [string, string][] = [
   ["B3log \u5f00\u6e90", "B3log Open Source"],
   ["\u590d\u5236\u5230\u516c\u4f17\u53f7", "Copy for WeChat"],
-  ["\u590d\u5236\u5230\u77e5\u4e4e", "Copy for Zhihu"],
   ["\u5df2\u590d\u5236\uff0c\u53ef\u5230", "Copied, paste it into "],
   ["\u5fae\u4fe1\u516c\u4f17\u53f7\u5e73\u53f0", "WeChat"],
-  ["\u77e5\u4e4e", "Zhihu"],
   ["\u8fdb\u884c\u7c98\u8d34", ""],
   ["\u5df2\u590d\u5236\u5230\u526a\u5207\u677f", "Copied to clipboard"],
   ["\u5df2\u590d\u5236", "Copied"],
@@ -41,6 +41,7 @@ const PHRASES: [string, string][] = [
 
 function clean(code: string, js: boolean): string {
   for (const [zh, en] of PHRASES) code = code.split(zh).join(en);
+  code = code.replace(REMOVED_ENDPOINT, "").replace(REMOVED_BRAND, "");
   return code.replace(CJK, (c) => (js ? "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0") : ""));
 }
 

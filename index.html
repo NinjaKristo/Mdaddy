@@ -20,6 +20,13 @@
           <img data-app-icon="chevron" alt="" />
         </button>
         <div id="brand-menu" role="menu" hidden>
+          <div class="brand-save-split" role="group" aria-label="Save options">
+            <button id="brand-save" type="button" role="menuitem">Save</button>
+            <button id="brand-save-as-toggle" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Save As options">▾</button>
+          </div>
+          <div id="brand-save-as-menu" class="brand-save-as-menu" role="menu" hidden>
+            <button id="brand-save-as" type="button" role="menuitem">Save As…</button>
+          </div>
           <button id="brand-settings" type="button" role="menuitem"><img data-app-icon="settings" alt="" /><span>Settings</span></button>
           <button id="brand-ai" type="button" role="menuitem"><img data-app-icon="ai" alt="" /><span>AI</span></button>
           <button id="brand-send" type="button" role="menuitem" aria-expanded="false"><img data-app-icon="send" alt="" /><span>Send</span></button>
@@ -32,6 +39,7 @@
         </div>
       </span>
     </div>
+    <button id="reader-exit" type="button" hidden title="Return to editing" aria-label="Return to editing"><span aria-hidden="true">↩</span> Edit</button>
     <div id="text-color-controls" hidden>
       <button id="btn-reader-toggle" type="button" title="Reader mode" aria-label="Reader mode">
         <img data-app-icon="readerMode" alt="" />

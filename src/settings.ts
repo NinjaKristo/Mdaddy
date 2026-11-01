@@ -98,7 +98,7 @@ export function loadSendTargets(): SendTarget[] {
   try {
     const v = JSON.parse(ctx.prefGet(PREF.sendTargets) || "null");
     if (Array.isArray(v)) {
-      const safe = v.filter((t: SendTarget) => !/wechat|weixin|zhihu/i.test(`${t.id} ${t.name} ${t.program}`));
+      const safe = v.filter((t: SendTarget) => !/wechat|weixin/i.test(`${t.id} ${t.name} ${t.program}`));
       if (safe.length !== v.length) ctx.prefSet(PREF.sendTargets, JSON.stringify(safe));
       // make sure built-ins stay present even after edits
       const ids = new Set(safe.map((t: SendTarget) => t.id));
@@ -188,21 +188,20 @@ export function showShortcutScreen(force = false): void {
   mark.addEventListener("click", () => document.getElementById("btn-brand-logo")?.click());
   menu.addEventListener("click", () => document.getElementById("btn-brand-menu")?.click());
   brand.append(mark, wordmark, menu);
-  const close = h("button", { type: "button", class: "primary shortcut-screen-close", text: "Close" });
+  const closeBottom = h("button", { type: "button", class: "primary shortcut-screen-close", text: "Close" });
   const openSettings = h("button", { type: "button", text: "Settings" });
   const modal = h("div", { id: "shortcut-screen", class: "modal-mask", role: "dialog", "aria-modal": "true", "aria-label": "Keyboard shortcuts" },
     h("div", { class: "modal shortcut-screen-modal" },
-      h("div", { class: "shortcut-screen-head" }, brand, h("h2", { text: "Shortcuts" }), close),
+      h("div", { class: "shortcut-screen-head" }, brand, h("h2", { text: "Shortcuts" })),
       h("div", { class: "shortcut-screen-body" }, shortcutKeys()),
-      h("div", { class: "modal-btns shortcut-screen-foot" }, openSettings, h("span", { class: "grow" }), close.cloneNode(true))));
+      h("div", { class: "modal-btns shortcut-screen-foot" }, openSettings, h("span", { class: "grow" }), closeBottom)));
   const shut = () => modal.remove();
-  close.addEventListener("click", shut);
-  modal.querySelector(".shortcut-screen-foot .shortcut-screen-close")?.addEventListener("click", shut);
+  closeBottom.addEventListener("click", shut);
   openSettings.addEventListener("click", () => { shut(); openSettingsDialog("shortcuts"); });
   modal.addEventListener("pointerdown", (e) => { if (e.target === modal) shut(); });
   modal.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); shut(); } });
   document.body.append(modal);
-  close.focus();
+  closeBottom.focus();
 }
 
 // ---------- settings ----------
@@ -669,6 +668,6 @@ export function openSettingsDialog(section: Section = "shortcuts"): void {
 export function initSettings(c: SettingsCtx): void {
   ctx = c;
   applyAppearanceColors();
-  loadSendTargets(); // immediately strip removed WeChat / Zhihu targets from the persisted preferences
+  loadSendTargets(); // immediately strip removed WeChat targets from the persisted preferences
   onKeysChanged(() => document.dispatchEvent(new CustomEvent("mdaddy:keys-changed")));
 }

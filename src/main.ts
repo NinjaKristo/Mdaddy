@@ -49,6 +49,23 @@ window.addEventListener("keydown", (e) => {
   }
   void inRenameInput; // save / palette / every other shortcut now lives in the command registry (src/commands.ts)
 }, true);
+// WebView2 can swallow forward Delete in the editor while Backspace still works.
+// Route character-forward deletion through Chromium's editing command before Vditor's element handler.
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Delete" || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.isComposing) return;
+  const target = e.target as Element | null;
+  if (!target?.closest?.(".vditor")) return;
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return;
+  const range = selection.getRangeAt(0);
+  if (!range.collapsed || range.startContainer.nodeType !== Node.TEXT_NODE) return;
+  const text = range.startContainer as Text;
+  if (range.startOffset >= text.length) return;
+  if (document.execCommand("forwardDelete")) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }
+}, true);
 type EditorMode = "ir" | "wysiwyg" | "sv";
 let currentMode: EditorMode = "wysiwyg"; // visual by default; sv is the raw Markdown source view
 let vditorInited = false; // whether Vditor finished its first initialisation (mode-switch rebuilds do not rerun openDoc/pendingFile)
@@ -62,7 +79,7 @@ const VDITOR_LANG: Record<Lang, "en_US"> = { "en": "en_US" };
 const UI_TEXT: Record<Lang, Record<string, string>> = {
   "en": {
     menuFile: "File", menuView: "View", openMenu: "Open…", printMenu: "Print…",
-    open: "Open", save: "Save", openTip: "Open a .md/.markdown/.txt file (or drag one into the window)", saveTip: "Save the current document", welcomeName: "Welcome", untitled: "Untitled", noDoc: "(none)",
+    open: "Open", save: "Save", openTip: "Open a .md/.markdown/.txt file (or drag one into the window)", saveTip: "Save the current document", untitled: "Untitled", noDoc: "(none)",
     emptyHint: 'Click "Open" above, or drag a .md file into the window to start editing',
     noHeadings: "(No headings yet: use # to add a section)",
     noOpenFile: '(No file open: click "Open" above or drag a .md file here)',
@@ -129,17 +146,6 @@ const UI_TEXT: Record<Lang, Record<string, string>> = {
   },
 };
 
-const WELCOME_TEXT: Record<Lang, string> = {
-  "en": `# Welcome to Mdaddy
-
-- Double-click a .md file or drag it into the window to open
-- Open multiple files in **tabs** (they won't overwrite each other)
-- Left outline: click to navigate, ✕ to delete a section, drag to reorder
-- Top toolbar: Open / Save
-- Switch between **WYSIWYG** and **Raw-by-line** with **Ctrl+Alt+M**
-`,
-};
-
 // ---- v0.5.0 portable-mode preference layer: PORTABLE uses Rust-side Data/settings.json, the installed version keeps localStorage ----
 // In portable mode the WebView2 data folder points to %TEMP% (not persistent per machine), so localStorage preferences would be lost;
 // everything goes through prefGet/prefSet: loaded once into an in-memory map at startup, fully written on change (low-frequency writes like font size / panel width, no debounce needed).
@@ -167,6 +173,110 @@ function prefRemove(key: string): void {
   }
   delete PREFS[key];
   void invoke("save_prefs", { v: PREFS }).catch(() => { /* same as above */ });
+}
+
+const TOOLBAR_DOCK_KEY = "mdaddy-toolbar-dock";
+type ToolbarDock = "top" | "left" | "beside-outline" | "right";
+let toolbarDockUndo: ToolbarDock | null = null;
+
+function initToolbarDocking(): void {
+  const toolbar = document.getElementById("toolbar");
+  const main = document.getElementById("main");
+  const outline = document.getElementById("outline-panel");
+  const editor = document.getElementById("editor-wrap");
+  if (!toolbar || !main || !outline || !editor) return;
+  const valid = (value: string | null): ToolbarDock =>
+    value === "left" || value === "beside-outline" || value === "right" ? value : "top";
+  let dock = valid(prefGet(TOOLBAR_DOCK_KEY));
+  toolbar.dataset.dock = dock;
+  let menu: HTMLElement | null = null;
+  const apply = (next: ToolbarDock, remember = true) => {
+    if (next === dock && toolbar.parentElement === (next === "top" ? document.body : main)) return;
+    if (remember && next !== dock) toolbarDockUndo = dock;
+    dock = next;
+    toolbar.dataset.dock = dock;
+    if (dock === "top") {
+      document.body.insertBefore(toolbar, document.getElementById("tabs"));
+      toolbar.classList.remove("toolbar-move-mode");
+    } else {
+      if (dock === "left") main.insertBefore(toolbar, outline);
+      else if (dock === "beside-outline") main.insertBefore(toolbar, editor);
+      else main.append(toolbar);
+    }
+    prefSet(TOOLBAR_DOCK_KEY, dock);
+    const ai = document.getElementById("ai-panel");
+    if (ai && !ai.hidden) positionAiPanel();
+  };
+  const positionAiPanel = () => {
+    const ai = document.getElementById("ai-panel");
+    if (!ai || ai.hidden) return;
+    const rect = toolbar.getBoundingClientRect();
+    ai.style.left = `${Math.max(0, rect.left)}px`;
+    ai.style.top = `${Math.min(window.innerHeight - 120, rect.bottom)}px`;
+    ai.style.maxHeight = `calc(100vh - ${Math.min(window.innerHeight - 120, rect.bottom)}px - 8px)`;
+  };
+  const showMenu = (x: number, y: number) => {
+    menu?.remove();
+    menu = document.createElement("div");
+    menu.className = "toolbar-dock-menu";
+    menu.setAttribute("role", "menu");
+    const add = (label: string, action: () => void, disabled = false) => {
+      const button = document.createElement("button");
+      button.type = "button"; button.textContent = label; button.disabled = disabled;
+      button.setAttribute("role", "menuitem");
+      button.addEventListener("click", () => { action(); menu?.remove(); menu = null; });
+      menu!.append(button);
+    };
+    add("Undo toolbar move", () => { if (toolbarDockUndo) { const old = toolbarDockUndo; toolbarDockUndo = null; apply(old, false); } }, toolbarDockUndo === null);
+    add("Done", () => toolbar.classList.remove("toolbar-move-mode"));
+    document.body.append(menu);
+    menu.style.left = `${Math.max(4, Math.min(x, innerWidth - 190))}px`;
+    menu.style.top = `${Math.max(4, Math.min(y, innerHeight - menu.offsetHeight - 4))}px`;
+  };
+  apply(dock, false);
+  toolbar.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    toolbar.classList.add("toolbar-move-mode");
+    showMenu(event.clientX, event.clientY);
+  });
+  let drag: { x: number; y: number; moved: boolean } | null = null;
+  toolbar.addEventListener("pointerdown", (event) => {
+    if (!toolbar.classList.contains("toolbar-move-mode") || event.button !== 0 || (event.target as Element).closest(".toolbar-dock-menu")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    drag = { x: event.clientX, y: event.clientY, moved: false };
+    toolbar.setPointerCapture(event.pointerId);
+  });
+  toolbar.addEventListener("pointermove", (event) => {
+    if (!drag) return;
+    const dx = event.clientX - drag.x, dy = event.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 8) drag.moved = true;
+    if (drag.moved) {
+      toolbar.classList.add("toolbar-dragging");
+      toolbar.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
+    }
+  });
+  toolbar.addEventListener("pointerup", (event) => {
+    if (!drag) return;
+    const moved = drag.moved; drag = null;
+    toolbar.style.transform = "";
+    toolbar.classList.remove("toolbar-dragging");
+    if (!moved) return;
+    const outlineRect = outline.getBoundingClientRect();
+    const next: ToolbarDock = event.clientY < 64 ? "top"
+      : event.clientX < 48 ? "left"
+      : event.clientX > innerWidth - 48 ? "right"
+      : event.clientX <= outlineRect.right + 48 ? "beside-outline"
+      : dock;
+    apply(next);
+    toolbar.classList.remove("toolbar-move-mode");
+    menu?.remove(); menu = null;
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (menu && !menu.contains(event.target as Node)) { menu.remove(); menu = null; }
+  });
+  window.addEventListener("resize", positionAiPanel);
+  document.addEventListener("mdaddy:ai-panel-open", positionAiPanel);
 }
 async function initPrefs(): Promise<void> {
   try {
@@ -269,8 +379,6 @@ function bigSizeLabel(charCount: number): string {
   if (currentLang === "en") return Math.round(charCount / 1000) + "K";
   return (charCount / 10000).toFixed(1);
 }
-function welcomeMd(): string { return WELCOME_TEXT[currentLang]; }
-
 // ---- editor font size (selection-based, independent of PDF: PRINT_CSS's fixed 14px stays) ----
 // Markdown has no native font-size syntax → use inline HTML: wrap the selected text in <span style="font-size:Npx">.
 // WYSIWYG/instant rendering (contenteditable) renders the span directly; lute keeps it when writing back md (<span> appears in the .md, that's normal).
@@ -418,6 +526,7 @@ function initTextColors(): void {
     else openFind(false);
   });
   document.getElementById("btn-reader-toggle")?.addEventListener("click", () => toggleReaderMode());
+  document.getElementById("reader-exit")?.addEventListener("click", () => toggleReaderMode());
   const editor = document.getElementById("editor");
   if (editor) new MutationObserver(updateReaderModeIcon).observe(editor, { attributes: true, attributeFilter: ["class"], subtree: true });
   updateReaderModeIcon();
@@ -893,12 +1002,14 @@ function positionCodeBtn(pre: HTMLElement | null): void {
   }
   codeBtnFor = pre;
   const host = document.getElementById("editor-wrap")!.getBoundingClientRect();
-  const r = pre.getBoundingClientRect();
   const collapseHost = pre.closest<HTMLElement>(".vditor-wysiwyg__block[data-type='code-block']") || pre;
+  const collapsed = collapseHost.dataset.collapsed === "true";
+  const r = collapsed ? collapseHost.getBoundingClientRect() : pre.getBoundingClientRect();
   const code = pre.querySelector("code");
   lang.textContent = pre.dataset.lang || (/language-([\w+#-]+)/.exec(code?.className || "")?.[1] ?? "text");
-  collapse.textContent = collapseHost.dataset.collapsed === "true" ? "⌄" : "⌃";
-  collapse.title = collapseHost.dataset.collapsed === "true" ? "Expand code block" : "Collapse code block";
+  collapse.textContent = collapsed ? "⌄" : "⌃";
+  collapse.title = collapsed ? "Expand code block" : "Collapse code block";
+  collapse.setAttribute("aria-label", collapse.title);
   controls.style.top = r.top - host.top + 4 + "px";
   controls.style.right = Math.max(0, host.right - r.right) + 8 + "px";
   controls.classList.add("visible");
@@ -1868,7 +1979,7 @@ function switchDoc(id: string) {
   markTreeCurrent(); // the file tree's current-file highlight follows tab switches (tree not reloaded, expansion state kept)
 }
 
-// Empty state after all tabs are closed (closing the welcome page is allowed): covers the editor, prompts to open a file
+// Empty state after all tabs are closed: covers the editor, prompts to open a file
 function showEmptyState() {
   document.getElementById("big-load")?.setAttribute("hidden", ""); // clear any leftover large-file loading notice
   document.getElementById("empty-state")!.hidden = false;
@@ -1898,7 +2009,7 @@ async function closeDoc(id: string) {
     activeId = null;
     const next = docs[idx] || docs[idx - 1] || null;
     if (next) switchDoc(next.id);
-    else showEmptyState(); // all tabs closed: show the empty state (closing the welcome page is allowed, no forced reopen)
+    else showEmptyState(); // all tabs closed: show the empty state, no forced tab reopen
   }
   renderTabs();
   scheduleSessionSave(); // v0.3.26 session: tab structure changed
@@ -2032,7 +2143,7 @@ async function loadLazyDoc(doc: Doc, silent = false): Promise<void> {
   switchDoc(doc.id); // lazy=false takes the normal load path (restoreScroll is consumed at the end of applyContent)
 }
 
-// Startup session restore: success = true (boot skips the welcome page). Not restored when there is a startup file (double-clicking a .md = clear intent)
+// Startup session restore: success = true (boot skips the blank untitled document). Not restored when there is a startup file.
 async function restoreSession(): Promise<boolean> {
   const s = uiStateAll.session as { v?: number; tabs?: SessionTab[]; a?: string } | null | undefined;
   if (!s || !Array.isArray(s.tabs) || s.tabs.length === 0) return false;
@@ -2069,7 +2180,7 @@ async function restoreSession(): Promise<boolean> {
     const d = docs.find((x) => x.id === activeId)!;
     await loadLazyDoc(d, true); // active tab loads synchronously (including the large-document path/defences); silent = dead files cleared quietly
     if (!docs.some((x) => x.id === activeId)) {
-      // active tab is dead: other tabs left → activate the first (lazy, switchDoc reads it); none left → treat as no session and open the welcome page
+      // active tab is dead: other tabs left → activate the first (lazy, switchDoc reads it); none left → treat as no session
       if (docs.length === 0) return false;
       const next = docs[0];
       activeId = next.id;
@@ -2356,9 +2467,22 @@ function renderRecent(): void {
 function closeBrandUi(): void {
   const wrap = document.getElementById("brand-wrap");
   const menu = document.getElementById("brand-menu") as HTMLElement | null;
-  if (menu) menu.hidden = true;
-  document.getElementById("brand-send-submenu")?.setAttribute("hidden", "");
-  document.getElementById("brand-recent-submenu")?.setAttribute("hidden", "");
+  const send = document.getElementById("brand-send-submenu") as HTMLElement | null;
+  const recent = document.getElementById("brand-recent-submenu") as HTMLElement | null;
+  if (menu) {
+    menu.hidden = true;
+    menu.classList.remove("submenu-open");
+    menu.style.cssText = "";
+    if (wrap && menu.parentElement !== wrap) wrap.insertBefore(menu, send?.parentElement === wrap ? send : null);
+  }
+  for (const panel of [send, recent]) {
+    if (!panel) continue;
+    panel.hidden = true;
+    panel.style.cssText = "";
+    if (wrap && panel.parentElement !== wrap) wrap.append(panel);
+  }
+  document.getElementById("brand-save-as-menu")?.setAttribute("hidden", "");
+  document.getElementById("brand-save-as-toggle")?.setAttribute("aria-expanded", "false");
   document.getElementById("send-menu")?.setAttribute("hidden", "");
   wrap?.classList.remove("submenu-open");
   document.getElementById("btn-brand-menu")?.setAttribute("aria-expanded", "false");
@@ -3702,6 +3826,7 @@ function vditorOptions(mode: EditorMode): VditorOptions {
       });
     },
     preview: {
+      actions: ["desktop", "tablet", "mobile", "mp-wechat"],
       // content theme follows the theme switch (light/dark/eye; eye = our own eye-care bean green)
       theme: { current: contentThemeOf(themeName), path: "/vditor-assets/dist/css/content-theme" },
       hljs: { lineNumber: true, style: "github" },
@@ -3802,7 +3927,7 @@ function vditorOptions(mode: EditorMode): VditorOptions {
       rebindTableResize(); // v0.3.11 table column resizing (edge detection + persisted reapplication)
       closeFind(); // a mode/language switch destroys and rebuilds: all old match nodes are invalid
       if (!vditorInited) {
-        // first initialisation: restore the last session (v0.3.26: tabs + reading positions), open the welcome page only without a session;
+        // first initialisation: restore the last session (v0.3.26: tabs + reading positions), open a blank untitled document without a session;
         // with a startup file (double-clicking a .md) = restore the session, then append and activate the target file (changed in v0.5.1: the old v0.3.26 semantics
         // "with an argument only open that file, no session" made the first two tabs vanish when the user double-clicked a third md, a counter-intuitive report)
         vditorInited = true;
@@ -3812,7 +3937,7 @@ function vditorOptions(mode: EditorMode): VditorOptions {
           void restoreSession().finally(() => loadFile(f));
         } else {
           void restoreSession().then((ok) => {
-            if (!ok) openDoc(null, welcomeMd(), t("welcomeName"));
+            if (!ok) openDoc(null, "", t("untitled"));
           });
         }
       } else {
@@ -4017,8 +4142,7 @@ function setLang(lang: Lang) {
     if (cur) {
       const v = mdValue();
       if (v !== "" || cur.content === "") cur.content = v;
-      // the welcome page (no path) updates its content with the language; user documents (with a path) keep their content
-      if (!cur.path) { cur.content = welcomeMd(); cur.name = t("welcomeName"); cur.dirty = false; }
+      // Unsaved untitled documents keep their content and name across language changes too.
     }
     // same as switchMode: a language rebuild must also keep --doc-zoom (the real cause of the report "the text got bigger after switching language" —
     // the font size didn't change, the 80% zoom was cleared by destroy and the view went back to 100%)
@@ -4439,6 +4563,77 @@ function bindPasteCaretFollow() {
     pasteAt = Date.now();
     window.setTimeout(() => { if (Date.now() - pasteAt < 4000) scrollCaretIntoBand(); }, 350);
     window.setTimeout(() => { if (Date.now() - pasteAt < 4000) scrollCaretIntoBand(); }, 900);
+  }, true);
+}
+
+function bindPlainMultilinePaste(): void {
+  document.addEventListener("paste", (event) => {
+    if (!vditor) return;
+    const target = event.target as Element | null;
+    const root = target?.closest<HTMLElement>("#editor .vditor-reset");
+    const clipboard = event.clipboardData;
+    if (!root || !clipboard || clipboard.files.length > 0) return;
+    const pre = target?.closest("#editor pre");
+    if (pre && pre !== root) return;
+    const plain = clipboard.getData("text/plain");
+    if (!plain.trim()) return;
+    const normalizedPlain = plain.replace(/\r\n?/g, "\n").trim();
+    const pastedLines = normalizedPlain.split("\n").map((line) => line.trim()).filter(Boolean);
+    const parsedUrls = pastedLines.map((line) => {
+      try {
+        const url = new URL(line.replace(/^<|>$/g, ""));
+        return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+      } catch { return null; }
+    });
+    const isUrlPaste = pastedLines.length > 0 && parsedUrls.every((url) => url !== null);
+    if (!/[\r\n]/.test(plain) && !isUrlPaste) return;
+    // Keep rich text from documents and webpages. Convert plain text and code-shaped clipboard data to normal text with hard line breaks.
+    const html = clipboard.getData("text/html");
+    let codeLike = isUrlPaste || !html.trim();
+    if (html.trim() && !isUrlPaste) {
+      const body = new DOMParser().parseFromString(html, "text/html").body;
+      const hasCode = !!body.querySelector("pre, code") || /font-family\s*:[^;]*(monospace|consolas|courier)/i.test(html);
+      const hasOtherFormatting = !!body.querySelector("a, b, strong, i, em, s, ul, ol, table, img, h1, h2, h3, h4, h5, h6");
+      codeLike = hasCode && !hasOtherFormatting;
+    }
+    if (!codeLike) return;
+    const text = normalizedPlain.replace(/\n{2,}/g, "\n");
+    if (!text) return;
+    const selection = window.getSelection();
+    if (!selection?.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    if (!root.contains(range.startContainer)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    // Paste into a code block remains code. Paste into inline code exits that mark so multiple lines become ordinary text.
+    const startElement = range.startContainer.nodeType === Node.ELEMENT_NODE
+      ? range.startContainer as Element : range.startContainer.parentElement;
+    const inlineCode = startElement?.closest("code");
+    if (inlineCode && !inlineCode.closest("pre")) {
+      const parent = inlineCode.parentNode;
+      if (parent) {
+        const index = Array.prototype.indexOf.call(parent.childNodes, inlineCode) as number;
+        const startInCode = range.startContainer === inlineCode;
+        const endInCode = range.endContainer === inlineCode;
+        const startOffset = range.startOffset;
+        const endOffset = range.endOffset;
+        const children = Array.from(inlineCode.childNodes);
+        children.forEach((child) => parent.insertBefore(child, inlineCode));
+        inlineCode.remove();
+        if (startInCode) range.setStart(parent, index + Math.min(startOffset, children.length));
+        if (endInCode) range.setEnd(parent, index + Math.min(endOffset, children.length));
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+    }
+    const lines = isUrlPaste
+      ? parsedUrls.map((url, index) => {
+        const safeLabel = pastedLines[index].replace(/[\\[\]]/g, "\\$&");
+        return `[${safeLabel}](<${url}>)`;
+      })
+      : text.split("\n");
+    const markdown = lines.map((line, i) => i < lines.length - 1 ? line.replace(/[ \t]+$/, "") + "  " : line).join("\n");
+    vditor.insertMD(markdown);
   }, true);
 }
 
@@ -6003,6 +6198,7 @@ async function boot() {
   // channel isn't ready, invoke stays pending forever and hangs the whole module (including this boot) (lesson learned);
   // during boot IPC is ready (the next line's get_startup_file is also an invoke, the existing convention).
   await initPrefs();
+  initToolbarDocking();
   await initInstancePrompts();
   { // at module top level detectLang ran before portable values were loaded (fell back to navigator); correct with the portable value here — the UI isn't built yet, direct assignment is safe
     const pl = prefGet("md-editor-lang");
@@ -6015,7 +6211,7 @@ async function boot() {
     // ignored outside tauri
   }
   // v0.3.26 session restore prerequisite: ui-state must be ready before initVditor (the after first-init branch uses
-  // session data to decide "restore session or welcome page", and an async then would lose the race against Vditor construction). Rust reads a small
+  // session data to decide "restore session or blank untitled document", and an async then would lose the race against Vditor construction). Rust reads a small
   // JSON in <5ms, no perceptible startup cost. uiStateLoaded is set true synchronously, so the old then timing issue (memRecent merge) is gone.
   try {
     uiStateAll = (await invoke<Record<string, unknown> | null>("load_ui_state")) || {};
@@ -6149,6 +6345,60 @@ async function boot() {
   } catch {
     // ignored outside tauri
   }
+  // Convert browser tab drags (Firefox text/x-moz-url, Chrome/Firefox HTML and URI-list) into Markdown links.
+  // Read every format synchronously while the DataTransfer is available, then prefer formats carrying tab titles.
+  const readDraggedLinks = (data: DataTransfer): { title: string; url: string }[] => {
+    const validUrl = (raw: string): string | null => {
+      try {
+        const parsed = new URL(raw.trim().replace(/^<|>$/g, ""));
+        return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : null;
+      } catch { return null; }
+    };
+    const readLines = (value: string): string[] => value.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
+    const html = data.getData("text/html");
+    const htmlLinks: { title: string; url: string }[] = [];
+    if (html) {
+      const parsed = new DOMParser().parseFromString(html, "text/html");
+      parsed.querySelectorAll("a[href]").forEach((anchor) => {
+        const url = validUrl(anchor.getAttribute("href") || "");
+        if (url) htmlLinks.push({ url, title: (anchor.textContent || "").trim() });
+      });
+    }
+    const titleFor = (url: string): string => htmlLinks.find((link) => link.url === url)?.title || "";
+    const mozLines = data.getData("text/x-moz-url");
+    if (mozLines) {
+      const lines = readLines(mozLines);
+      const links: { title: string; url: string }[] = [];
+      for (let i = 0; i < lines.length; i++) {
+        const url = validUrl(lines[i]);
+        if (!url) continue;
+        const next = lines[i + 1] || "";
+        const nextIsUrl = !!validUrl(next);
+        const title = !nextIsUrl && next ? lines[++i] : titleFor(url);
+        links.push({ url, title: title || titleFor(url) || new URL(url).hostname });
+      }
+      if (links.length) return links;
+    }
+    if (htmlLinks.length) return htmlLinks.map((link) => ({ ...link, title: link.title || new URL(link.url).hostname }));
+    const uriList = readLines(data.getData("text/uri-list"));
+    const uriLinks = uriList.flatMap((line) => {
+      const url = validUrl(line);
+      return url ? [{ url, title: titleFor(url) || new URL(url).hostname }] : [];
+    });
+    if (uriLinks.length) return uriLinks;
+    const plain = readLines(data.getData("text/plain"));
+    const plainLinks: { title: string; url: string }[] = [];
+    for (let i = 0; i < plain.length; i++) {
+      const url = validUrl(plain[i]);
+      if (!url) continue;
+      const next = plain[i + 1] || "";
+      const nextIsUrl = !!validUrl(next);
+      const title = !nextIsUrl && next ? plain[++i] : titleFor(url);
+      plainLinks.push({ url, title: title || titleFor(url) || new URL(url).hostname });
+    }
+    return plainLinks;
+  };
+
   // drag-to-open: on Windows/WebView2 wry's native drag-drop has a timing race (registered before the WebView2 child window's drop target
   // is ready → interception fails → no tauri://drag-drop event, measured: nothing happens at all).
   // Use HTML5 drag-drop instead: with dragDropEnabled:false WebView2's native HTML5 drop fires reliably.
@@ -6161,6 +6411,23 @@ async function boot() {
     });
     window.addEventListener("drop", async (e) => {
       e.preventDefault();
+      const transfer = e.dataTransfer;
+      if (transfer) {
+        const links = readDraggedLinks(transfer);
+        if (links.length && vditor) {
+          e.stopPropagation();
+          const markdown = links.map(({ title, url }) => {
+            const safeTitle = title.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+              .replace(/[\\\[\]()]/g, "\\$&").replace(/[\r\n]+/g, " ");
+            const safeUrl = url.replace(/\(/g, "%28").replace(/\)/g, "%29");
+            return `- [${safeTitle}](${safeUrl})`;
+          }).join("\n");
+          vditor.focus();
+          vditor.insertValue(markdown + "\n");
+          showToast(`Added ${links.length} tab link${links.length === 1 ? "" : "s"}.`);
+          return;
+        }
+      }
       const f = e.dataTransfer?.files?.[0];
       if (!f) return;
       if (/\.pdf$/i.test(f.name)) {
@@ -6178,7 +6445,7 @@ async function boot() {
         const text = await f.text();
         openDoc(null, text, f.name, "UTF-8");
       }
-    });
+    }, true);
     // self-test: with --dnd-selftest at startup, synthesize one drop to verify the HTML5 drag-drop → IPC → temp file chain (kept in, never fires on a normal launch)
     if (await invoke<boolean>("dnd_selftest_enabled").catch(() => false)) {
       const blob = new Blob(["%PDF-1.4\n%selftest\n"], { type: "application/pdf" });
@@ -6252,6 +6519,7 @@ async function boot() {
 
   startAutosave();
   bindPasteCaretFollow();
+  bindPlainMultilinePaste();
   bindFindBar();
   bindHistory(); // v0.3.11 version history (toolbar 🕘 button)
   initOutlineResize(); // v0.3.12 outline sidebar resizing (Word-style edge drag + persistence)
@@ -6391,7 +6659,9 @@ function styleToolbarGlyphs(): void {
 }
 
 function updateReaderModeIcon(): void {
-  const full = !!document.querySelector("#editor .vditor--fullscreen");
+  const full = !!document.querySelector("#editor.vditor--fullscreen, #editor .vditor--fullscreen");
+  const exitButton = document.getElementById("reader-exit") as HTMLButtonElement | null;
+  if (exitButton) exitButton.hidden = !full;
   const img = document.querySelector<HTMLImageElement>("#btn-reader-toggle img");
   const button = document.getElementById("btn-reader-toggle");
   if (img) img.src = full ? APP_ASSETS.editMode : APP_ASSETS.readerMode;
@@ -6405,6 +6675,104 @@ function clickTool(type: string): void {
   const b = document.querySelector<HTMLElement>(`#toolbar .vditor-toolbar [data-type="${type}"]`);
   if (!b || b.classList.contains("vditor-menu--disabled")) return;
   b.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+}
+
+let nativeLineClick = false;
+function insertHorizontalRule(): void {
+  const selection = window.getSelection();
+  const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+  const start = range?.startContainer;
+  const startElement = start?.nodeType === Node.ELEMENT_NODE ? start as Element : start?.parentElement;
+  const paragraph = startElement?.closest<HTMLElement>("#editor .vditor-wysiwyg p");
+
+  if (!range || !paragraph || currentMode !== "wysiwyg") {
+    nativeLineClick = true;
+    try { clickTool("line"); } finally { nativeLineClick = false; }
+    return;
+  }
+
+  const caretRange = range.cloneRange();
+  if (!caretRange.collapsed) caretRange.collapse(false);
+  const trailingRange = document.createRange();
+  trailingRange.setStart(caretRange.startContainer, caretRange.startOffset);
+  trailingRange.setEnd(paragraph, paragraph.childNodes.length);
+  const trailing = trailingRange.extractContents();
+  const rule = document.createElement("hr");
+  rule.dataset.block = "0";
+  const after = document.createElement("p");
+  after.dataset.block = "0";
+  after.append(trailing);
+  if (!after.textContent && !after.children.length) after.append(document.createElement("wbr"));
+  paragraph.after(rule, after);
+
+  const editor = document.querySelector<HTMLElement>("#editor .vditor-wysiwyg .vditor-reset");
+  editor?.focus();
+  const caret = document.createRange();
+  caret.setStart(after, 0);
+  caret.collapse(true);
+  selection?.removeAllRanges();
+  selection?.addRange(caret);
+  editor?.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertParagraph" }));
+}
+
+// Vditor's native line control inserts after the whole paragraph; route its click through
+// the same caret-aware split used by the keyboard shortcut.
+document.addEventListener("click", (event) => {
+  if (nativeLineClick) return;
+  const button = (event.target as Element | null)?.closest<HTMLElement>('#toolbar .vditor-toolbar [data-type="line"]');
+  if (!button) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  insertHorizontalRule();
+}, true);
+
+function selectedCodeBlock(): HTMLElement | null {
+  if (currentMode !== "wysiwyg") return null;
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return null;
+  const node = selection.getRangeAt(0).startContainer;
+  const element = node.nodeType === Node.ELEMENT_NODE ? node as Element : node.parentElement;
+  return element?.closest<HTMLElement>('#editor .vditor-wysiwyg__block[data-type="code-block"]') || null;
+}
+
+function unwrapSelectedCodeBlock(block: HTMLElement): void {
+  if (!vditor) return;
+  const editor = block.closest<HTMLElement>(".vditor-wysiwyg");
+  const code = block.querySelector("pre > code");
+  if (!editor || !code || !block.parentNode) return;
+  const text = (code.textContent || "").replace(/\r\n?/g, "\n").replace(/\n$/, "");
+  const lines = text.split("\n");
+  const fragment = document.createDocumentFragment();
+  let last: HTMLParagraphElement | null = null;
+  for (const line of lines) {
+    const paragraph = document.createElement("p");
+    paragraph.dataset.block = "0";
+    if (line) paragraph.textContent = line;
+    else paragraph.appendChild(document.createElement("wbr"));
+    fragment.appendChild(paragraph);
+    last = paragraph;
+  }
+  block.replaceWith(fragment);
+  if (last) {
+    vditor.focus();
+    const range = document.createRange();
+    range.selectNodeContents(last);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+  positionCodeBtn(null);
+  editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+}
+
+function toggleCodeBlock(): void {
+  const block = selectedCodeBlock();
+  if (block) unwrapSelectedCodeBlock(block);
+  else {
+    document.querySelector<HTMLElement>('#toolbar .vditor-toolbar [data-type="code"]')?.classList.remove("vditor-menu--disabled");
+    clickTool("code");
+  }
 }
 
 function setHeading(level: number): void {
@@ -6493,14 +6861,14 @@ function registerCommands(): void {
   fmt("fmt.bold", "Bold", "Ctrl+B", tool("bold"));
   fmt("fmt.italic", "Italic", "Ctrl+I", tool("italic"));
   fmt("fmt.strike", "Strikethrough", "Ctrl+D", tool("strike"));
-  fmt("fmt.line", "Horizontal line", "Ctrl+Shift+H", tool("line"));
+  fmt("fmt.line", "Horizontal line", "Ctrl+Shift+H", insertHorizontalRule);
   fmt("fmt.quote", "Quote", "Ctrl+;", tool("quote"));
   fmt("fmt.list", "Bulleted list", "Ctrl+L", tool("list"));
   fmt("fmt.orderedList", "Numbered list", "Ctrl+Shift+L", tool("ordered-list"));
   fmt("fmt.check", "Task list", "Ctrl+J", tool("check"));
   fmt("fmt.outdent", "Outdent", "Ctrl+[", tool("outdent"));
   fmt("fmt.indent", "Indent", "Ctrl+]", tool("indent"));
-  fmt("fmt.code", "Code block", "Ctrl+U", tool("code"));
+  fmt("fmt.code", "Code block", "Ctrl+U", toggleCodeBlock);
   fmt("fmt.inlineCode", "Inline code", "Ctrl+G", tool("inline-code"));
   fmt("fmt.link", "Link", "Ctrl+K", tool("link"));
   fmt("fmt.table", "Table", "Ctrl+T", tool("table"));
@@ -6541,6 +6909,19 @@ function initMdaddyFeatures(): void {
     indent: "fmt.indent", code: "fmt.code", "inline-code": "fmt.inlineCode", link: "fmt.link", table: "fmt.table",
     undo: "edit.undo", redo: "edit.redo", "edit-mode": "view.editMode", fullscreen: "view.reader", "os-fullscreen": "view.fullscreen",
   });
+  document.addEventListener("selectionchange", () => {
+    if (selectedCodeBlock()) document.querySelector<HTMLElement>('#toolbar .vditor-toolbar [data-type="code"]')?.classList.remove("vditor-menu--disabled");
+  });
+  document.addEventListener("click", (event) => {
+    const button = (event.target as Element | null)?.closest<HTMLElement>('#toolbar .vditor-toolbar [data-type="code"]');
+    if (!button) return;
+    const block = selectedCodeBlock();
+    if (!block) { button.classList.remove("vditor-menu--disabled"); return; }
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    unwrapSelectedCodeBlock(block);
+  }, true);
   initTooltips();
   initSettings({
     prefGet, prefSet, showToast,
@@ -6595,6 +6976,31 @@ function initMdaddyFeatures(): void {
   const brand = document.getElementById("btn-brand-menu");
   const brandWrap = document.getElementById("brand-wrap");
   const brandMenu = document.getElementById("brand-menu") as HTMLElement | null;
+  const positionBrandMenu = () => {
+    if (!brandMenu || !brand || brandMenu.hidden) return;
+    document.body.append(brandMenu);
+    brandMenu.style.position = "fixed";
+    const anchor = brand.getBoundingClientRect();
+    const width = brandMenu.offsetWidth || 218;
+    const sideDock = document.getElementById("toolbar")?.dataset.dock !== "top";
+    const left = sideDock && document.getElementById("toolbar")?.dataset.dock === "right"
+      ? anchor.left - width - 6
+      : sideDock ? anchor.right + 6 : anchor.left;
+    const top = sideDock ? anchor.top : anchor.bottom;
+    brandMenu.style.left = `${Math.max(4, Math.min(left, innerWidth - width - 4))}px`;
+    brandMenu.style.top = `${Math.max(4, Math.min(top, innerHeight - brandMenu.offsetHeight - 4))}px`;
+  };
+  window.addEventListener("resize", positionBrandMenu);
+  const positionBrandSubmenu = (panel: HTMLElement) => {
+    if (!brandMenu || panel.hidden) return;
+    document.body.append(panel);
+    panel.style.position = "fixed";
+    const menuRect = brandMenu.getBoundingClientRect();
+    const width = panel.offsetWidth || 260;
+    const openLeft = menuRect.right + width + 8 > innerWidth;
+    panel.style.left = `${Math.max(4, openLeft ? menuRect.left - width - 4 : menuRect.right + 4)}px`;
+    panel.style.top = `${Math.max(4, Math.min(menuRect.top, innerHeight - panel.offsetHeight - 4))}px`;
+  };
   logoButton?.addEventListener("click", (event) => { event.stopPropagation(); setSideCollapsed(!sideCollapsed); });
   brand?.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -6603,11 +7009,28 @@ function initMdaddyFeatures(): void {
     closeBrandUi();
     brandMenu.hidden = false;
     brand.setAttribute("aria-expanded", "true");
+    positionBrandMenu();
     renderRecent();
   });
   document.addEventListener("pointerdown", (event) => {
-    if (brandMenu && !brandMenu.hidden && !(event.target as Element).closest("#brand-wrap")) closeBrandUi();
+    const target = event.target as Node;
+    const surfaces = [brandWrap, brandMenu, document.getElementById("brand-send-submenu"), document.getElementById("brand-recent-submenu")];
+    if (brandMenu && !brandMenu.hidden && !surfaces.some((surface) => surface?.contains(target))) closeBrandUi();
   }, true);
+  document.getElementById("brand-save")?.addEventListener("click", () => {
+    const doc = activeDoc(); closeBrandUi(); if (doc) void saveDoc(doc);
+  });
+  document.getElementById("brand-save-as-toggle")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const menu = document.getElementById("brand-save-as-menu");
+    const button = event.currentTarget as HTMLButtonElement;
+    if (!menu) return;
+    menu.hidden = !menu.hidden;
+    button.setAttribute("aria-expanded", String(!menu.hidden));
+  });
+  document.getElementById("brand-save-as")?.addEventListener("click", () => {
+    const doc = activeDoc(); closeBrandUi(); if (doc) void saveDocAs(doc);
+  });
   document.getElementById("brand-settings")?.addEventListener("click", () => { closeBrandUi(); openSettingsDialog(); });
   document.getElementById("brand-ai")?.addEventListener("click", () => { closeBrandUi(); toggleAiPanel(); });
   document.getElementById("brand-send")?.addEventListener("click", (event) => {
@@ -6620,7 +7043,9 @@ function initMdaddyFeatures(): void {
       brandMenu.hidden = false;
       brand?.setAttribute("aria-expanded", "true");
       panel.hidden = false;
-      brandWrap?.classList.add("submenu-open");
+      brandMenu.classList.add("submenu-open");
+      positionBrandMenu();
+      positionBrandSubmenu(panel);
       button.setAttribute("aria-expanded", "true");
       toggleSendMenu(true);
     }
@@ -6636,7 +7061,9 @@ function initMdaddyFeatures(): void {
       brand?.setAttribute("aria-expanded", "true");
       renderRecent();
       panel.hidden = false;
-      brandWrap?.classList.add("submenu-open");
+      brandMenu.classList.add("submenu-open");
+      positionBrandMenu();
+      positionBrandSubmenu(panel);
       button.setAttribute("aria-expanded", "true");
     }
   });

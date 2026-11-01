@@ -9,7 +9,7 @@ if [ -z "$CARGO_BIN" ]; then
   echo "Cargo was not found on PATH." >&2
   exit 1
 fi
-npx tauri icon Assets/MdaddyIcon-App.svg --output src-tauri/icons
+npx tauri icon public/mdaddy-icon.svg --output src-tauri/icons
 npm run build
 (cd src-tauri && "$CARGO_BIN" build --release --bins --features tauri/custom-protocol)
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/copy-release.ps1 \

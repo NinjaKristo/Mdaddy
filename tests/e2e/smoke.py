@@ -3,6 +3,12 @@ import os, subprocess, sys, tempfile, time
 from cdp import App, Results
 
 r = Results()
+blank_app = App(port=9331)
+try:
+    r.check("new workspace starts with an empty untitled document", blank_app.wait("!!document.querySelector('#editor .vditor-reset') && document.querySelector('#editor .vditor-reset').innerText.trim() === '' && !document.querySelector('#editor .vditor-reset').innerText.includes('Welcome to Mdaddy')"))
+finally:
+    blank_app.close()
+
 tmp = tempfile.mkdtemp(prefix="mdaddy-smoke-")
 md = os.path.join(tmp, "hello.md")
 with open(md, "w", encoding="utf-8") as f:

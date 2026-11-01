@@ -12,27 +12,33 @@
 
 ## Features
 
-- Edit Markdown in a visual editor or switch to raw-by-line mode with <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd>.
-- Navigate long documents with the outline and open several files in tabs.
-- Browse folders, search for Markdown files, and keep favorite folders close at hand.
-- Paste images and choose how to store them, then resize them in the editor.
-- Choose a light, dark, eye-care, or warm-paper appearance.
-- Use keyboard shortcuts, undo, and export tools while keeping your Markdown files on your computer.
+- Edit Markdown visually or switch to raw-by-line mode with <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd>.
+- Drag groups of tabs from Firefox or Chrome into the editor to create a bulleted list of titled links.
+- Paste URLs as separate clickable links, with line breaks preserved.
+- Format selected text, work with headings, insert horizontal rules, and collapse code blocks.
+- Move the formatting toolbar by right-clicking it and dragging it to the top or a vertical side rail.
+- Open several documents in tabs, navigate with the outline, browse folders, and keep favorite folders close.
+- Paste and resize images, choose light, dark, eye-care, or warm-paper appearance, and export documents.
+- Use Reader mode, then return to editing with the compact **Edit** button.
 
 ## Download
 
-Check the [GitHub Releases](https://github.com/NinjaKristo/Mdaddy/releases) page for Windows builds. The application is distributed as a standalone `Mdaddy.exe`.
+Download the standalone Windows app from [GitHub Releases](https://github.com/NinjaKristo/Mdaddy/releases). The current release provides [Mdaddy.exe](https://github.com/NinjaKristo/Mdaddy/releases/download/v0.6.0/Mdaddy.exe).
 
 ## Build from source
 
-Requirements: Windows 10 or 11, Node.js, Rust, and the Microsoft C++ Build Tools required by Tauri.
+Requirements: Windows 10 or 11, Node.js, Rust, Microsoft C++ Build Tools, and Git Bash.
 
-```powershell
+```bash
 npm install
-npm run tauri build
+bash scripts/build-release.sh
 ```
 
-The packaged Windows executable is produced under `src-tauri/target/release/`. The project build workflow can also update `release/Mdaddy.exe` for local testing.
+The script builds the frontend and Windows executable, updates the app icons, copies the executable to `release/Mdaddy.exe`, and runs the release smoke and UI-controls checks. Rust build output is also available under `src-tauri/target/release/`.
+
+## UI and icon guide
+
+See [docs/UI-BUTTONS.md](docs/UI-BUTTONS.md) for the control-to-feature map and artwork locations. Most authored artwork lives in `Assets/`; `public/mdaddy-icon.svg` generates the application icons, including the Windows `.ico`.
 
 ## License
 

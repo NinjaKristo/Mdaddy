@@ -260,6 +260,7 @@ export function toggleAiPanel(force?: boolean): void {
   panel.hidden = !on;
   document.body.classList.toggle("ai-open", on);
   if (on) {
+    document.dispatchEvent(new Event("mdaddy:ai-panel-open"));
     const sel = panel.querySelector<HTMLSelectElement>("#ai-model")!;
     if (!sel.options.length) void fillModels(sel);
     panel.querySelector<HTMLTextAreaElement>("#ai-input")!.focus();
